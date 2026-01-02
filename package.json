@@ -1,0 +1,24 @@
+{
+  "name": "kable-quiz-backend",
+  "version": "1.0.0",
+  "description": "Backend server for Kable Quiz to send quiz results to HubSpot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@hubspot/api-client": "^13.4.0",
+    "axios": "^1.7.0",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.4.5",
+    "env": "^0.0.2",
+    "express": "^4.19.0",
+    "mongoose": "^8.20.3",
+    "nodemailer": "^6.9.8"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
