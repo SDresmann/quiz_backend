@@ -10,7 +10,12 @@ const authRoutes = require('./routes/authRoutes');
 
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin:[
+    'http://localhost:3000',
+    'https://quiz-frontend-mnq4.onrender.com'
+  ]
+}));
 app.use(express.json());
 
 const {PORT, MONGO_URI} = require('./config')
