@@ -8,9 +8,9 @@ const RetakeToken = require('../schema/retakeSchema');
 
 const { FRONTEND_URL, PASS_URL } = require('../config');
 
-// ✅ These should come from your services (update the paths if yours differ)
-const { updateHubSpotScores } = require('../services/hubspotService');
-const { sendPassFailEmailGraph } = require('../services/emailService');
+// ✅ services
+const { updateHubSpotScores } = require('../services/hubspotService'); // should update DEAL now
+const { sendPassFailEmailGraph } = require('../services/emailService'); // Graph email
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
@@ -21,13 +21,17 @@ async function getLatestAttempt(email) {
 async function createRetakeToken(email) {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24); // 24 hours
-  await RetakeToken.create({ token, email, expiresAt });
+  await RetakeToken.create({ token, email, expiresAt, used: false });
   return token;
 }
 
+/**
+ * GET /api/quiz-attempt?email=...
+ * Used by frontend on load to see if user already has an attempt saved.
+ */
 router.get('/quiz-attempt', async (req, res) => {
   try {
-    const email = String(req.query.email || '').trim().toLowerCase();
+    const email = normalizeEmail(req.query.email);
     if (!email) return res.status(400).json({ error: 'Missing email' });
 
     const attempt = await getLatestAttempt(email);
@@ -48,16 +52,22 @@ router.get('/quiz-attempt', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/quiz-progress
+ * Saves progress while user is taking the quiz (prevents re-taking without retake token)
+ */
 router.post('/quiz-progress', async (req, res) => {
   try {
     const { user, currentIndex, answers } = req.body;
+
     const email = normalizeEmail(user?.email);
     if (!email) return res.status(400).json({ error: 'Missing user.email' });
 
     const latest = await getLatestAttempt(email);
 
-    // If they already completed latest attempt, don't allow accidental restart
+    // If latest attempt is already completed, block saving progress (prevents re-starting)
     if (latest?.status === 'completed') {
+      console.warn('[PROGRESS] Blocked: latest attempt already completed for', email);
       return res.status(403).json({ error: 'Quiz is completed' });
     }
 
@@ -81,13 +91,19 @@ router.post('/quiz-progress', async (req, res) => {
       { upsert: true, new: true }
     );
 
+    console.log('[PROGRESS] Saved progress:', { email, attemptNo, currentIndex });
     return res.json({ ok: true });
   } catch (e) {
-    console.error('[ERROR] /api/quiz-progress', e);
-    return res.status(500).json({ error: 'Server error' });
+    console.error('[ERROR] /api/quiz-progress crashed:', e);
+    return res.status(500).json({ error: 'Server error', details: e?.message || String(e) });
   }
 });
 
+/**
+ * POST /api/retake/redeem
+ * Redeems a token from the "try again" email, and creates a new attempt.
+ * Body: { token }
+ */
 router.post('/retake/redeem', async (req, res) => {
   try {
     const token = String(req.body?.token || '').trim();
@@ -97,10 +113,11 @@ router.post('/retake/redeem', async (req, res) => {
     if (!doc) return res.status(404).json({ error: 'Invalid token' });
 
     if (doc.used) return res.status(403).json({ error: 'Token already used' });
-    if (doc.expiresAt.getTime() < Date.now()) return res.status(403).json({ error: 'Token expired' });
+    if (doc.expiresAt && doc.expiresAt.getTime() < Date.now()) return res.status(403).json({ error: 'Token expired' });
 
     const email = normalizeEmail(doc.email);
 
+    // mark token as used
     doc.used = true;
     doc.usedAt = new Date();
     await doc.save();
@@ -117,13 +134,24 @@ router.post('/retake/redeem', async (req, res) => {
       answers: {},
     });
 
+    console.log('[RETAKE] Redeemed token. New attempt created:', { email, attemptNo: nextAttemptNo });
+
     return res.json({ ok: true, email, attemptNo: nextAttemptNo });
   } catch (e) {
-    console.error('[ERROR] /api/retake/redeem', e);
-    return res.status(500).json({ error: 'Server error' });
+    console.error('[ERROR] /api/retake/redeem crashed:', e);
+    return res.status(500).json({ error: 'Server error', details: e?.message || String(e) });
   }
 });
 
+/**
+ * POST /api/quiz-submission
+ * Final submit.
+ * - computes overall percent
+ * - updates HubSpot DEAL scores (service)
+ * - sends pass/fail email (Graph)
+ * - if fail => generates retake token + url
+ * - if pass => sends PASS_URL in email
+ */
 router.post('/quiz-submission', async (req, res) => {
   console.log('[API] /api/quiz-submission hit');
 
@@ -152,8 +180,10 @@ router.post('/quiz-submission', async (req, res) => {
 
     const latest = await getLatestAttempt(email);
     if (latest?.status === 'completed') {
+      console.warn('[SUBMIT] Blocked: quiz already completed for', email);
       return res.status(403).json({ error: 'Quiz already completed' });
     }
+
     const attemptNo = latest?.attemptNo ?? 1;
 
     const lr = Number(logical_reasoning);
@@ -172,6 +202,7 @@ router.post('/quiz-submission', async (req, res) => {
 
     console.log('[SCORE] Computed:', { lr, vr, nr, totalCorrect, tq, percent, passed });
 
+    // Save final attempt
     await QuizAttempt.findOneAndUpdate(
       { email, attemptNo },
       {
@@ -185,7 +216,7 @@ router.post('/quiz-submission', async (req, res) => {
         },
         status: 'completed',
         answers: answers && typeof answers === 'object' ? answers : {},
-        currentIndex: tq - 1,
+        currentIndex: Math.max(0, tq - 1),
         result: {
           logical_reasoning: lr,
           verbal_reasoning: vr,
@@ -203,26 +234,30 @@ router.post('/quiz-submission', async (req, res) => {
     let passUrl = null;
 
     if (passed) {
-      passUrl = PASS_URL;
+      passUrl = PASS_URL || null;
+      console.log('[PASS] passUrl:', passUrl);
     } else {
       const token = await createRetakeToken(email);
       retakeUrl = `${FRONTEND_URL}/?retake=${encodeURIComponent(token)}`;
       console.log('[RETAKE] Generated retakeUrl:', retakeUrl);
     }
 
-    console.log('[FLOW] Updating HubSpot fields...');
+    console.log('[FLOW] Updating HubSpot DEAL fields...');
     const hubspotResult = await updateHubSpotScores(email, {
       logical_reasoning: lr,
       verbal_reasoning: vr,
       numerical_reasoning: nr,
+      percent,
+      passed,
     });
     console.log('[FLOW] HubSpot update result:', hubspotResult);
 
     console.log('[FLOW] Sending pass/fail email…');
     await sendPassFailEmailGraph({
       toEmail: email,
-      firstName: user.firstName,
+      firstName: user?.firstName || '',
       percent,
+      passed,
       retakeUrl,
       passUrl,
     });
