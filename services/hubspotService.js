@@ -1,7 +1,16 @@
+// services/hubspotService.js
 const hubspot = require('@hubspot/api-client');
 const Token = require('../schema/tokenSchema');
 
-const { HUBSPOT_CLIENT_ID, HUBSPOT_CLIENT_SECRET } = require('../config');
+const {
+  HUBSPOT_CLIENT_ID,
+  HUBSPOT_CLIENT_SECRET,
+  HUBSPOT_STAGE_ACCEPTANCE_LETTER,
+} = require('../config');
+
+// If you're not on Node 18+, uncomment these two lines:
+// const fetch = require('node-fetch'); // npm i node-fetch@2
+// global.fetch = fetch;
 
 async function getHubSpotTokens() {
   return await Token.findOne({ provider: 'hubspot' }).lean();
@@ -29,7 +38,7 @@ async function refreshHubSpotToken() {
   const tokens = await getHubSpotTokens();
   if (!tokens?.refresh_token) throw new Error('Missing refresh token (connect HubSpot first)');
 
-  console.log('[HUBSPOT] Refreshing access token');
+  console.log('[HUBSPOT] Refreshing access token...');
 
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
@@ -116,55 +125,59 @@ async function findMostRecentDealIdForContact(hsClient, contactId) {
   return bestDealId;
 }
 
-async function updateDealScores(hsClient, dealId, scores) {
-  console.log('[HUBSPOT] Updating DEAL properties...', { dealId, scores });
-
-  await hsClient.crm.deals.basicApi.update(dealId, {
-    properties: {
-      logical_reasoning: String(scores.logical_reasoning),
-      verbal_reasoning: String(scores.verbal_reasoning),
-      numerical_reasoning: String(scores.numerical_reasoning),
-    },
-  });
-
-  console.log('[HUBSPOT] Deal update OK');
-  return { updated: true, dealId };
-}
-
-async function updateHubSpotScores(email, { logical_reasoning, verbal_reasoning, numerical_reasoning }) {
+async function updateHubSpotScores(email, scores, passed) {
   const tokens = await getHubSpotTokens();
-  if (!tokens?.access_token) throw new Error('HubSpot not connected. Visit /auth/install');
+  if (!tokens?.access_token) throw new Error('HubSpot not connected');
 
   let accessToken = tokens.access_token;
   let hs = new hubspot.Client({ accessToken });
 
-  const scores = { logical_reasoning, verbal_reasoning, numerical_reasoning };
-
-  try {
+  async function attemptUpdate() {
     const contactId = await findContactIdByEmail(hs, email);
     if (!contactId) return { updated: false, reason: 'Contact not found' };
 
     const dealId = await findMostRecentDealIdForContact(hs, contactId);
-    if (!dealId) return { updated: false, reason: 'No deal associated to contact', contactId };
+    if (!dealId) return { updated: false, reason: 'No deal found' };
 
-    return await updateDealScores(hs, dealId, scores);
+    // ✅ Build properties (deal properties must exist in HubSpot)
+    const properties = {
+      logical_reasoning: String(scores.logical_reasoning),
+      verbal_reasoning: String(scores.verbal_reasoning),
+      numerical_reasoning: String(scores.numerical_reasoning),
+    };
+
+    // ✅ Move deal to Acceptance Letter from ANY stage if passed
+    if (passed) {
+      properties.dealstage = HUBSPOT_STAGE_ACCEPTANCE_LETTER;
+      console.log(
+        '[HUBSPOT] Passed=true → moving deal to Acceptance Letter:',
+        properties.dealstage
+      );
+    } else {
+      console.log('[HUBSPOT] Passed=false → dealstage unchanged');
+    }
+
+    console.log('[HUBSPOT] Updating deal...', { dealId, properties });
+
+    await hs.crm.deals.basicApi.update(dealId, { properties });
+
+    console.log('[HUBSPOT] Deal update OK');
+    return { updated: true, dealId };
+  }
+
+  try {
+    return await attemptUpdate();
   } catch (err) {
     const msg = String(err?.message || err);
     console.error('[HUBSPOT] Deal update failed:', msg);
 
-    if (msg.includes('401') || msg.toLowerCase().includes('unauthorized')) {
-      console.warn('[HUBSPOT] Unauthorized. Refreshing token and retrying once…');
-
+    // Token expired/unauthorized → refresh once and retry
+    if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('expired')) {
+      console.warn('[HUBSPOT] Unauthorized/expired. Refreshing token and retrying once…');
       accessToken = await refreshHubSpotToken();
       hs = new hubspot.Client({ accessToken });
 
-      const contactId = await findContactIdByEmail(hs, email);
-      if (!contactId) return { updated: false, reason: 'Contact not found' };
-
-      const dealId = await findMostRecentDealIdForContact(hs, contactId);
-      if (!dealId) return { updated: false, reason: 'No deal associated to contact', contactId };
-
-      const result = await updateDealScores(hs, dealId, scores);
+      const result = await attemptUpdate();
       return { ...result, refreshed: true };
     }
 
@@ -176,4 +189,5 @@ module.exports = {
   updateHubSpotScores,
   saveHubSpotTokens,
   getHubSpotTokens,
+  refreshHubSpotToken,
 };

@@ -1,4 +1,3 @@
-// routes/quizRoutes.js
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
@@ -8,8 +7,7 @@ const RetakeToken = require('../schema/retakeSchema');
 
 const { FRONTEND_URL, PASS_URL } = require('../config');
 
-// ✅ services
-const { updateHubSpotScores } = require('../services/hubspotService'); // should update DEAL now
+const { updateHubSpotScores } = require('../services/hubspotService'); // updates DEAL now
 const { sendPassFailEmailGraph } = require('../services/emailService'); // Graph email
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
@@ -27,7 +25,6 @@ async function createRetakeToken(email) {
 
 /**
  * GET /api/quiz-attempt?email=...
- * Used by frontend on load to see if user already has an attempt saved.
  */
 router.get('/quiz-attempt', async (req, res) => {
   try {
@@ -52,10 +49,7 @@ router.get('/quiz-attempt', async (req, res) => {
   }
 });
 
-/**
- * POST /api/quiz-progress
- * Saves progress while user is taking the quiz (prevents re-taking without retake token)
- */
+
 router.post('/quiz-progress', async (req, res) => {
   try {
     const { user, currentIndex, answers } = req.body;
@@ -65,7 +59,7 @@ router.post('/quiz-progress', async (req, res) => {
 
     const latest = await getLatestAttempt(email);
 
-    // If latest attempt is already completed, block saving progress (prevents re-starting)
+
     if (latest?.status === 'completed') {
       console.warn('[PROGRESS] Blocked: latest attempt already completed for', email);
       return res.status(403).json({ error: 'Quiz is completed' });
@@ -99,11 +93,7 @@ router.post('/quiz-progress', async (req, res) => {
   }
 });
 
-/**
- * POST /api/retake/redeem
- * Redeems a token from the "try again" email, and creates a new attempt.
- * Body: { token }
- */
+
 router.post('/retake/redeem', async (req, res) => {
   try {
     const token = String(req.body?.token || '').trim();
@@ -113,11 +103,11 @@ router.post('/retake/redeem', async (req, res) => {
     if (!doc) return res.status(404).json({ error: 'Invalid token' });
 
     if (doc.used) return res.status(403).json({ error: 'Token already used' });
-    if (doc.expiresAt && doc.expiresAt.getTime() < Date.now()) return res.status(403).json({ error: 'Token expired' });
+    if (doc.expiresAt && doc.expiresAt.getTime() < Date.now())
+      return res.status(403).json({ error: 'Token expired' });
 
     const email = normalizeEmail(doc.email);
 
-    // mark token as used
     doc.used = true;
     doc.usedAt = new Date();
     await doc.save();
@@ -143,27 +133,13 @@ router.post('/retake/redeem', async (req, res) => {
   }
 });
 
-/**
- * POST /api/quiz-submission
- * Final submit.
- * - computes overall percent
- * - updates HubSpot DEAL scores (service)
- * - sends pass/fail email (Graph)
- * - if fail => generates retake token + url
- * - if pass => sends PASS_URL in email
- */
+
 router.post('/quiz-submission', async (req, res) => {
   console.log('[API] /api/quiz-submission hit');
 
   try {
-    const {
-      user,
-      logical_reasoning,
-      verbal_reasoning,
-      numerical_reasoning,
-      totalQuestions,
-      answers,
-    } = req.body;
+    const { user, logical_reasoning, verbal_reasoning, numerical_reasoning, totalQuestions, answers } =
+      req.body;
 
     console.log('[API] Incoming payload summary:', {
       email: user?.email,
@@ -202,7 +178,7 @@ router.post('/quiz-submission', async (req, res) => {
 
     console.log('[SCORE] Computed:', { lr, vr, nr, totalCorrect, tq, percent, passed });
 
-    // Save final attempt
+
     await QuizAttempt.findOneAndUpdate(
       { email, attemptNo },
       {
@@ -243,14 +219,17 @@ router.post('/quiz-submission', async (req, res) => {
     }
 
     console.log('[FLOW] Updating HubSpot DEAL fields...');
-    const hubspotResult = await updateHubSpotScores(email, {
-      logical_reasoning: lr,
-      verbal_reasoning: vr,
-      numerical_reasoning: nr,
-      percent,
-      passed,
-    });
+    const hubspotResult = await updateHubSpotScores(
+      email,
+      {
+        logical_reasoning: lr,
+        verbal_reasoning: vr,
+        numerical_reasoning: nr,
+      },
+      passed
+    );
     console.log('[FLOW] HubSpot update result:', hubspotResult);
+
 
     console.log('[FLOW] Sending pass/fail email…');
     await sendPassFailEmailGraph({
