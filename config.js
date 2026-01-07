@@ -14,10 +14,9 @@ const HUBSPOT_CLIENT_SECRET =
 const HUBSPOT_REDIRECT_URI =
   process.env.HUBSPOT_REDIRECT_URI || `${BASE_URL}/auth/callback`;
 
-// ✅ ADD THIS (your stage ID)
 const HUBSPOT_ACCEPTANCE_STAGE_ID = process.env.HUBSPOT_ACCEPTANCE_STAGE_ID;
 
-// ✅ OPTIONAL: keep the name your service expects
+// Alias so your services stay readable
 const HUBSPOT_STAGE_ACCEPTANCE_LETTER =
   process.env.HUBSPOT_STAGE_ACCEPTANCE_LETTER || HUBSPOT_ACCEPTANCE_STAGE_ID;
 
@@ -37,7 +36,6 @@ module.exports = {
   HUBSPOT_CLIENT_SECRET,
   HUBSPOT_REDIRECT_URI,
 
-  // ✅ EXPORT THESE
   HUBSPOT_ACCEPTANCE_STAGE_ID,
   HUBSPOT_STAGE_ACCEPTANCE_LETTER,
 
