@@ -32,4 +32,8 @@ const QuizAttemptSchema = new mongoose.Schema(
 // Make "latest attempt per email" easy
 QuizAttemptSchema.index({ email: 1, attemptNo: -1 }, { unique: true });
 
+// Delete each person's record 1 year after creation (MongoDB TTL)
+const ONE_YEAR_SECONDS = 365 * 24 * 60 * 60;
+QuizAttemptSchema.index({ createdAt: 1 }, { expireAfterSeconds: ONE_YEAR_SECONDS });
+
 module.exports = mongoose.model('QuizAttempt', QuizAttemptSchema);
