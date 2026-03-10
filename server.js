@@ -35,6 +35,7 @@ app.use('/api/quiz', quizRoutes);
 
 app.get('/health', (req, res) =>{
   res.json({ ok:true });
+  res.status(200).send("OK");
 });
 
 
