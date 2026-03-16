@@ -53,10 +53,19 @@ router.get('/install', (req, res) => {
   
   router.get('/callback', async (req, res) => {
     console.log('[OAUTH] /auth/callback hit');
+    console.log('[OAUTH] Raw URL:', req.originalUrl);
     console.log('[OAUTH] Query params:', req.query);
-  
+
+    // Fallback: parse code from raw URL if query was stripped (e.g. proxy)
+    const rawQuery = req.originalUrl.includes('?') ? req.originalUrl.split('?')[1] : '';
+    const urlParams = new URLSearchParams(rawQuery);
+    const codeFromUrl = urlParams.get('code');
+    const errorFromUrl = urlParams.get('error');
+
     try {
-      const { code, error, error_description } = req.query;
+      let code = req.query.code || codeFromUrl;
+      const error = req.query.error || errorFromUrl;
+      const error_description = req.query.error_description || urlParams.get('error_description');
   
       if (error) {
         console.error('[OAUTH] HubSpot returned error:', error, error_description);
@@ -66,8 +75,12 @@ router.get('/install', (req, res) => {
       }
 
       if (!code) {
-        console.error('[OAUTH] Missing code in callback');
-        return res.status(400).send('Missing code');
+        console.error('[OAUTH] Missing code in callback. Received query:', req.query);
+        return res.status(400).send(
+          'Missing code. Check: 1) In HubSpot app Auth tab, add Redirect URL exactly: ' +
+          HUBSPOT_REDIRECT_URI + ' 2) Run the flow from /api/auth/install in one go. Received: ' +
+          JSON.stringify(req.query)
+        );
       }
   
       console.log('[OAUTH] Exchanging code for tokens…');

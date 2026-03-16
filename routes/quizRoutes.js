@@ -218,31 +218,43 @@ router.post('/quiz-submission', async (req, res) => {
       console.log('[RETAKE] Generated retakeUrl:', retakeUrl);
     }
 
-    console.log('[FLOW] Updating HubSpot DEAL fields...');
-    const hubspotResult = await updateHubSpotScores(
-      email,
-      {
-        logical_reasoning: lr,
-        verbal_reasoning: vr,
-        numerical_reasoning: nr,
-      },
-      passed
-    );
-    console.log('[FLOW] HubSpot update result:', hubspotResult);
+    let hubspotResult = null;
+    try {
+      console.log('[FLOW] Updating HubSpot DEAL fields...');
+      hubspotResult = await updateHubSpotScores(
+        email,
+        {
+          logical_reasoning: lr,
+          verbal_reasoning: vr,
+          numerical_reasoning: nr,
+        },
+        passed
+      );
+      console.log('[FLOW] HubSpot update result:', hubspotResult);
+    } catch (hubspotErr) {
+      console.error('[FLOW] HubSpot update failed (quiz result still saved):', hubspotErr?.message || hubspotErr);
+      hubspotResult = { error: hubspotErr?.message || String(hubspotErr) };
+    }
 
-
-    console.log('[FLOW] Sending pass/fail email…');
-    await sendPassFailEmailGraph({
-      toEmail: email,
-      firstName: user?.firstName || '',
-      percent,
-      passed,
-      retakeUrl,
-      passUrl,
-    });
+    let emailSent = false;
+    try {
+      console.log('[FLOW] Sending pass/fail email…');
+      await sendPassFailEmailGraph({
+        toEmail: email,
+        firstName: user?.firstName || '',
+        percent,
+        passed,
+        retakeUrl,
+        passUrl,
+      });
+      emailSent = true;
+      console.log('[FLOW] Email sent.');
+    } catch (emailErr) {
+      console.error('[FLOW] Email send failed (quiz result still saved):', emailErr?.message || emailErr);
+    }
 
     console.log('[FLOW] Done.');
-    return res.json({ ok: true, percent, passed, hubspot: hubspotResult, retakeUrl, passUrl });
+    return res.json({ ok: true, percent, passed, hubspot: hubspotResult, retakeUrl, passUrl, emailSent });
   } catch (err) {
     console.error('[ERROR] quiz-submission crashed:', err);
     return res.status(500).json({ error: 'Server error', details: err?.message || String(err) });

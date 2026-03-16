@@ -11,8 +11,7 @@ const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const HUBSPOT_CLIENT_SECRET =
   process.env.HUBSPOT_CLIENT_SECRET || process.env.HUBSPOT_CLIENT_SERCRET;
 
-const HUBSPOT_REDIRECT_URI =
-  process.env.HUBSPOT_REDIRECT_URI || `${BASE_URL}/auth/callback`;
+const HUBSPOT_REDIRECT_URI = (process.env.HUBSPOT_REDIRECT_URI || `${BASE_URL}/api/auth/callback`).trim();
 
 const HUBSPOT_ACCEPTANCE_STAGE_ID = process.env.HUBSPOT_ACCEPTANCE_STAGE_ID;
 
@@ -43,4 +42,7 @@ module.exports = {
   GRAPH_CLIENT_SECRET,
   GRAPH_TENANT_ID,
   GRAPH_SENDER_EMAIL,
+
+  isGraphEmailConfigured: () =>
+    !!(GRAPH_CLIENT_ID && GRAPH_CLIENT_SECRET && GRAPH_TENANT_ID && GRAPH_SENDER_EMAIL),
 };
