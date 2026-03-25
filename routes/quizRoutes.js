@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const QuizAttempt = require('../schema/quizAttemptSchema');
 const RetakeToken = require('../schema/retakeSchema');
 
-const { FRONTEND_URL, PASS_URL } = require('../config');
+const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT } = require('../config');
 
 const { updateHubSpotScores } = require('../services/hubspotService'); // updates DEAL now
 const { sendPassFailEmailGraph } = require('../services/emailService'); // Graph email
@@ -174,9 +174,18 @@ router.post('/quiz-submission', async (req, res) => {
 
     const totalCorrect = lr + vr + nr;
     const percent = Math.round((totalCorrect / tq) * 100);
-    const passed = percent >= 60;
+    const passed = percent >= QUIZ_PASS_PERCENT;
 
-    console.log('[SCORE] Computed:', { lr, vr, nr, totalCorrect, tq, percent, passed });
+    console.log('[SCORE] Computed:', {
+      lr,
+      vr,
+      nr,
+      totalCorrect,
+      tq,
+      percent,
+      passThreshold: QUIZ_PASS_PERCENT,
+      passed,
+    });
 
 
     await QuizAttempt.findOneAndUpdate(

@@ -148,6 +148,10 @@ async function updateHubSpotScores(email, scores, passed) {
 
     // ✅ Move deal to Acceptance Letter from ANY stage if passed
     if (passed) {
+      if (!HUBSPOT_STAGE_ACCEPTANCE_LETTER) {
+        console.warn('[HUBSPOT] Passed=true but HUBSPOT_STAGE_ACCEPTANCE_LETTER is not configured');
+        return { updated: false, reason: 'Acceptance stage ID not configured' };
+      }
       properties.dealstage = HUBSPOT_STAGE_ACCEPTANCE_LETTER;
       console.log(
         '[HUBSPOT] Passed=true → moving deal to Acceptance Letter:',

@@ -4,6 +4,7 @@ const PORT = process.env.PORT || 4000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const PASS_URL = process.env.PASS_URL;
+const QUIZ_PASS_PERCENT = Number(process.env.QUIZ_PASS_PERCENT || 60);
 
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -30,6 +31,7 @@ module.exports = {
   FRONTEND_URL,
   MONGO_URI,
   PASS_URL,
+  QUIZ_PASS_PERCENT,
 
   HUBSPOT_CLIENT_ID,
   HUBSPOT_CLIENT_SECRET,
