@@ -7,7 +7,7 @@ const RetakeToken = require('../schema/retakeSchema');
 
 const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT } = require('../config');
 
-const { updateHubSpotScores } = require('../services/hubspotService'); // updates DEAL now
+const { updateHubSpotScores, moveDealToAssessmentsStage } = require('../services/hubspotService');
 const { sendPassFailEmailGraph } = require('../services/emailService'); // Graph email
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
@@ -67,7 +67,7 @@ router.post('/quiz-progress', async (req, res) => {
 
     const attemptNo = latest?.attemptNo ?? 1;
 
-    await QuizAttempt.findOneAndUpdate(
+    const doc = await QuizAttempt.findOneAndUpdate(
       { email, attemptNo },
       {
         email,
@@ -86,7 +86,24 @@ router.post('/quiz-progress', async (req, res) => {
     );
 
     console.log('[PROGRESS] Saved progress:', { email, attemptNo, currentIndex });
-    return res.json({ ok: true });
+
+    let hubspotAssessments = null;
+    if (!doc.hubspotAssessmentsStageSet) {
+      try {
+        hubspotAssessments = await moveDealToAssessmentsStage(email);
+        if (hubspotAssessments?.updated) {
+          await QuizAttempt.updateOne(
+            { email, attemptNo },
+            { $set: { hubspotAssessmentsStageSet: true } }
+          );
+        }
+      } catch (e) {
+        console.error('[PROGRESS] HubSpot assessments stage failed:', e?.message || e);
+        hubspotAssessments = { error: e?.message || String(e) };
+      }
+    }
+
+    return res.json({ ok: true, hubspot: hubspotAssessments });
   } catch (e) {
     console.error('[ERROR] /api/quiz-progress crashed:', e);
     return res.status(500).json({ error: 'Server error', details: e?.message || String(e) });

@@ -6,11 +6,27 @@ const {
   HUBSPOT_CLIENT_ID,
   HUBSPOT_CLIENT_SECRET,
   HUBSPOT_STAGE_ACCEPTANCE_LETTER,
+  HUBSPOT_STAGE_ASSESSMENTS,
 } = require('../config');
 
 // If you're not on Node 18+, uncomment these two lines:
 // const fetch = require('node-fetch'); // npm i node-fetch@2
 // global.fetch = fetch;
+
+function hubSpotErrorSummary(err) {
+  if (!err) return String(err);
+  const code = err.code ?? err.statusCode;
+  const body = err.body;
+  let detail = '';
+  if (body && typeof body === 'object') {
+    detail = body.message || JSON.stringify(body);
+  } else if (body != null) {
+    detail = String(body);
+  } else {
+    detail = err.message || String(err);
+  }
+  return code != null ? `HTTP ${code}: ${detail}` : detail;
+}
 
 async function getHubSpotTokens() {
   return await Token.findOne({ provider: 'hubspot' }).lean();
@@ -125,7 +141,12 @@ async function findMostRecentDealIdForContact(hsClient, contactId) {
   return bestDealId;
 }
 
-async function updateHubSpotScores(email, scores, passed) {
+/**
+ * Patch the contact's most recent deal. Retries once on token expiry.
+ * @param {string} email
+ * @param {Record<string, string>} properties HubSpot deal property names → string values
+ */
+async function patchHubSpotDealForEmail(email, properties) {
   const tokens = await getHubSpotTokens();
   if (!tokens?.access_token) throw new Error('HubSpot not connected');
 
@@ -139,28 +160,6 @@ async function updateHubSpotScores(email, scores, passed) {
     const dealId = await findMostRecentDealIdForContact(hs, contactId);
     if (!dealId) return { updated: false, reason: 'No deal found' };
 
-    // ✅ Build properties (deal properties must exist in HubSpot)
-    const properties = {
-      logical_reasoning: String(scores.logical_reasoning),
-      verbal_reasoning: String(scores.verbal_reasoning),
-      numerical_reasoning: String(scores.numerical_reasoning),
-    };
-
-    // ✅ Move deal to Acceptance Letter from ANY stage if passed
-    if (passed) {
-      if (!HUBSPOT_STAGE_ACCEPTANCE_LETTER) {
-        console.warn('[HUBSPOT] Passed=true but HUBSPOT_STAGE_ACCEPTANCE_LETTER is not configured');
-        return { updated: false, reason: 'Acceptance stage ID not configured' };
-      }
-      properties.dealstage = HUBSPOT_STAGE_ACCEPTANCE_LETTER;
-      console.log(
-        '[HUBSPOT] Passed=true → moving deal to Acceptance Letter:',
-        properties.dealstage
-      );
-    } else {
-      console.log('[HUBSPOT] Passed=false → dealstage unchanged');
-    }
-
     console.log('[HUBSPOT] Updating deal...', { dealId, properties });
 
     await hs.crm.deals.basicApi.update(dealId, { properties });
@@ -173,9 +172,8 @@ async function updateHubSpotScores(email, scores, passed) {
     return await attemptUpdate();
   } catch (err) {
     const msg = String(err?.message || err);
-    console.error('[HUBSPOT] Deal update failed:', msg);
+    console.error('[HUBSPOT] Deal update failed:', hubSpotErrorSummary(err));
 
-    // Token expired/unauthorized → refresh once and retry
     if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('expired')) {
       console.warn('[HUBSPOT] Unauthorized/expired. Refreshing token and retrying once…');
       accessToken = await refreshHubSpotToken();
@@ -189,8 +187,61 @@ async function updateHubSpotScores(email, scores, passed) {
   }
 }
 
+async function updateHubSpotScores(email, scores, passed) {
+  const scoreProperties = {
+    logical_reasoning: String(scores.logical_reasoning),
+    verbal_reasoning: String(scores.verbal_reasoning),
+    numerical_reasoning: String(scores.numerical_reasoning),
+  };
+
+  if (!passed) {
+    console.log('[HUBSPOT] Passed=false → dealstage unchanged');
+    return patchHubSpotDealForEmail(email, scoreProperties);
+  }
+
+  if (!HUBSPOT_STAGE_ACCEPTANCE_LETTER) {
+    console.warn('[HUBSPOT] Passed=true but HUBSPOT_STAGE_ACCEPTANCE_LETTER is not configured');
+    return { updated: false, reason: 'Acceptance stage ID not configured' };
+  }
+
+  const stage = String(HUBSPOT_STAGE_ACCEPTANCE_LETTER).trim();
+  const withStage = { ...scoreProperties, dealstage: stage };
+  console.log('[HUBSPOT] Passed=true → PATCH deal (scores + dealstage):', stage);
+
+  try {
+    return await patchHubSpotDealForEmail(email, withStage);
+  } catch (err) {
+    console.error('[HUBSPOT] Scores + stage PATCH failed:', hubSpotErrorSummary(err));
+    console.warn('[HUBSPOT] Retrying dealstage only (custom score properties may be missing on Deal)...');
+    try {
+      const stageOnly = await patchHubSpotDealForEmail(email, { dealstage: stage });
+      return {
+        ...stageOnly,
+        scorePropertiesSkipped: true,
+        scorePatchError: hubSpotErrorSummary(err),
+      };
+    } catch (err2) {
+      console.error('[HUBSPOT] dealstage-only retry also failed:', hubSpotErrorSummary(err2));
+      throw err2;
+    }
+  }
+}
+
+/** First quiz activity this attempt: move deal to configured Assessments stage. */
+async function moveDealToAssessmentsStage(email) {
+  if (!HUBSPOT_STAGE_ASSESSMENTS) {
+    console.warn('[HUBSPOT] Assessments stage move skipped: HUBSPOT_STAGE_ASSESSMENTS / HUBSPOT_ASSESSMENTS_STAGE_ID not set');
+    return { updated: false, reason: 'Assessments stage ID not configured' };
+  }
+
+  const stage = String(HUBSPOT_STAGE_ASSESSMENTS).trim();
+  console.log('[HUBSPOT] Quiz started / in progress → dealstage:', stage);
+  return patchHubSpotDealForEmail(email, { dealstage: stage });
+}
+
 module.exports = {
   updateHubSpotScores,
+  moveDealToAssessmentsStage,
   saveHubSpotTokens,
   getHubSpotTokens,
   refreshHubSpotToken,

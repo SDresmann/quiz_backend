@@ -16,6 +16,9 @@ const QuizAttemptSchema = new mongoose.Schema(
     currentIndex: { type: Number, default: 0 },
     answers: { type: Object, default: {} },
 
+    /** HubSpot: assessments dealstage applied once per attempt (first /quiz-progress). */
+    hubspotAssessmentsStageSet: { type: Boolean, default: false },
+
     result: {
       logical_reasoning: Number,
       verbal_reasoning: Number,
