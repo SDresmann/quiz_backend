@@ -7,6 +7,7 @@ const {
   HUBSPOT_CLIENT_SECRET,
   HUBSPOT_STAGE_ACCEPTANCE_LETTER,
   HUBSPOT_STAGE_ASSESSMENTS,
+  HUBSPOT_PIPELINE_ID,
 } = require('../config');
 
 // If you're not on Node 18+, uncomment these two lines:
@@ -98,7 +99,7 @@ async function findContactIdByEmail(hsClient, email) {
   return contactId;
 }
 
-async function findMostRecentDealIdForContact(hsClient, contactId) {
+async function findMostRecentDealForContact(hsClient, contactId) {
   console.log('[HUBSPOT] Looking up deals associated to contact:', contactId);
 
   const assoc = await hsClient.crm.associations.v4.basicApi.getPage('contacts', contactId, 'deals');
@@ -107,38 +108,56 @@ async function findMostRecentDealIdForContact(hsClient, contactId) {
   console.log('[HUBSPOT] Associated dealIds:', dealIds);
   if (!dealIds.length) return null;
 
-  let bestDealId = dealIds[0];
-  let bestLastModified = 0;
+  const preferredPipeline = String(HUBSPOT_PIPELINE_ID || '').trim();
+  const candidates = [];
 
   for (const dealId of dealIds) {
     try {
       const deal = await hsClient.crm.deals.basicApi.getById(
         dealId,
-        ['hs_lastmodifieddate', 'dealname'],
+        ['hs_lastmodifieddate', 'dealname', 'pipeline', 'dealstage'],
         undefined,
         undefined,
         false
       );
 
       const lastMod = new Date(deal?.properties?.hs_lastmodifieddate || 0).getTime();
+      const pipeline = String(deal?.properties?.pipeline || '').trim();
+      const dealstage = String(deal?.properties?.dealstage || '').trim();
 
       console.log('[HUBSPOT] Deal candidate:', {
         dealId,
         dealname: deal?.properties?.dealname,
         hs_lastmodifieddate: deal?.properties?.hs_lastmodifieddate,
+        pipeline,
+        dealstage,
       });
-
-      if (lastMod > bestLastModified) {
-        bestLastModified = lastMod;
-        bestDealId = dealId;
-      }
+      candidates.push({ dealId, lastMod, pipeline, dealstage });
     } catch (e) {
       console.warn('[HUBSPOT] Failed to fetch deal for sorting:', dealId, e?.message || e);
     }
   }
 
-  console.log('[HUBSPOT] Selected dealId:', bestDealId);
-  return bestDealId;
+  if (!candidates.length) return null;
+
+  const inPreferredPipeline = preferredPipeline
+    ? candidates.filter((c) => c.pipeline === preferredPipeline)
+    : candidates;
+
+  if (preferredPipeline && !inPreferredPipeline.length) {
+    console.warn(
+      '[HUBSPOT] No associated deals found in preferred pipeline',
+      preferredPipeline,
+      'falling back to most recently modified associated deal'
+    );
+  }
+
+  const pool = inPreferredPipeline.length ? inPreferredPipeline : candidates;
+  pool.sort((a, b) => b.lastMod - a.lastMod);
+  const selected = pool[0];
+
+  console.log('[HUBSPOT] Selected deal:', selected);
+  return selected;
 }
 
 /**
@@ -155,17 +174,29 @@ async function patchHubSpotDealForEmail(email, properties) {
 
   async function attemptUpdate() {
     const contactId = await findContactIdByEmail(hs, email);
-    if (!contactId) return { updated: false, reason: 'Contact not found' };
+    if (!contactId) return { updated: false, reason: 'Contact not found', contactId: null };
 
-    const dealId = await findMostRecentDealIdForContact(hs, contactId);
-    if (!dealId) return { updated: false, reason: 'No deal found' };
+    const deal = await findMostRecentDealForContact(hs, contactId);
+    if (!deal) return { updated: false, reason: 'No deal found', contactId };
 
-    console.log('[HUBSPOT] Updating deal...', { dealId, properties });
+    console.log('[HUBSPOT] Updating deal...', {
+      contactId,
+      dealId: deal.dealId,
+      pipeline: deal.pipeline,
+      dealstage: deal.dealstage,
+      properties,
+    });
 
-    await hs.crm.deals.basicApi.update(dealId, { properties });
+    await hs.crm.deals.basicApi.update(deal.dealId, { properties });
 
     console.log('[HUBSPOT] Deal update OK');
-    return { updated: true, dealId };
+    return {
+      updated: true,
+      contactId,
+      dealId: deal.dealId,
+      pipeline: deal.pipeline,
+      previousDealStage: deal.dealstage,
+    };
   }
 
   try {
