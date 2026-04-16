@@ -29,6 +29,78 @@ function hubSpotErrorSummary(err) {
   return code != null ? `HTTP ${code}: ${detail}` : detail;
 }
 
+let resolvedPipelineCache = { raw: null, resolved: null, expiresAt: 0 };
+let resolvePipelineInFlight = null;
+
+function isNumericId(value) {
+  return /^\d+$/.test(String(value || '').trim());
+}
+
+/**
+ * HubSpot deal `pipeline` is a pipeline id string. Env may contain a friendly value like "default".
+ * Resolve to the actual pipeline id using HubSpot Pipelines API (cached briefly).
+ */
+async function resolvePreferredPipelineId(hsClient) {
+  const raw = String(HUBSPOT_PIPELINE_ID || '').trim();
+  if (!raw) return null;
+
+  // Already a HubSpot pipeline id (numeric string)
+  if (isNumericId(raw)) return raw;
+
+  const now = Date.now();
+  if (
+    resolvedPipelineCache.resolved &&
+    resolvedPipelineCache.raw === raw.toLowerCase() &&
+    resolvedPipelineCache.expiresAt > now
+  ) {
+    return resolvedPipelineCache.resolved;
+  }
+
+  if (resolvePipelineInFlight) return resolvePipelineInFlight;
+
+  resolvePipelineInFlight = (async () => {
+    const key = raw.toLowerCase();
+    const resp = await hsClient.crm.pipelines.pipelinesApi.getAll('deals');
+    const pipelines = resp?.results || [];
+
+    const pickDefaultPipeline = () => {
+      const active = pipelines.filter((p) => !p.archived);
+      const byLabel = active.find((p) => String(p.label || '').toLowerCase().includes('default'));
+      if (byLabel) return String(byLabel.id);
+      const sorted = [...active].sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
+      if (sorted[0]) return String(sorted[0].id);
+      if (pipelines[0]) return String(pipelines[0].id);
+      return null;
+    };
+
+    let resolved = null;
+    if (key === 'default' || key === 'primary') {
+      resolved = pickDefaultPipeline();
+    } else {
+      const match = pipelines.find((p) => String(p.label || '').trim().toLowerCase() === key);
+      resolved = match ? String(match.id) : null;
+    }
+
+    if (!resolved) {
+      console.warn('[HUBSPOT] Could not resolve HUBSPOT_PIPELINE_ID from value:', raw);
+    } else {
+      console.log('[HUBSPOT] Resolved HUBSPOT_PIPELINE_ID:', { raw, resolved });
+    }
+
+    resolvedPipelineCache = {
+      raw: key,
+      resolved,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    };
+    return resolved;
+  })()
+    .finally(() => {
+      resolvePipelineInFlight = null;
+    });
+
+  return resolvePipelineInFlight;
+}
+
 async function getHubSpotTokens() {
   return await Token.findOne({ provider: 'hubspot' }).lean();
 }
@@ -108,7 +180,8 @@ async function findMostRecentDealForContact(hsClient, contactId) {
   console.log('[HUBSPOT] Associated dealIds:', dealIds);
   if (!dealIds.length) return null;
 
-  const preferredPipeline = String(HUBSPOT_PIPELINE_ID || '').trim();
+  const preferredPipelineRaw = String(HUBSPOT_PIPELINE_ID || '').trim();
+  const preferredPipeline = preferredPipelineRaw ? await resolvePreferredPipelineId(hsClient) : null;
   const candidates = [];
 
   for (const dealId of dealIds) {
@@ -147,7 +220,7 @@ async function findMostRecentDealForContact(hsClient, contactId) {
   if (preferredPipeline && !inPreferredPipeline.length) {
     console.warn(
       '[HUBSPOT] No associated deals found in preferred pipeline',
-      preferredPipeline,
+      { preferredPipelineRaw, preferredPipelineResolved: preferredPipeline },
       'falling back to most recently modified associated deal'
     );
   }
@@ -179,21 +252,22 @@ async function patchHubSpotDealForEmail(email, properties) {
     const deal = await findMostRecentDealForContact(hs, contactId);
     if (!deal) return { updated: false, reason: 'No deal found', contactId };
 
+    const dealId = deal.dealId;
     console.log('[HUBSPOT] Updating deal...', {
       contactId,
-      dealId: deal.dealId,
+      dealId,
       pipeline: deal.pipeline,
       dealstage: deal.dealstage,
       properties,
     });
 
-    await hs.crm.deals.basicApi.update(deal.dealId, { properties });
+    await hs.crm.deals.basicApi.update(dealId, { properties });
 
     console.log('[HUBSPOT] Deal update OK');
     return {
       updated: true,
       contactId,
-      dealId: deal.dealId,
+      dealId,
       pipeline: deal.pipeline,
       previousDealStage: deal.dealstage,
     };
