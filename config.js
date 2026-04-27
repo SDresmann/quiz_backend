@@ -33,6 +33,13 @@ const GRAPH_CLIENT_SECRET = process.env.GRAPH_CLIENT_SECRET;
 const GRAPH_TENANT_ID = process.env.GRAPH_TENANT_ID;
 const GRAPH_SENDER_EMAIL = process.env.GRAPH_SENDER_EMAIL;
 
+/** Internal quiz summary (SMTP / nodemailer). Falls back to EMAIL_USER if unset. */
+const EMAIL_HOST = process.env.EMAIL_HOST;
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_PASS = process.env.EMAIL_PASS;
+const EMAIL_FROM = process.env.EMAIL_FROM || EMAIL_USER;
+const INTERNAL_QUIZ_SUMMARY_TO = process.env.INTERNAL_QUIZ_SUMMARY_TO || EMAIL_USER;
+
 /** Comma-separated extra origins for CORS (Render quiz UI often differs from FRONTEND_URL) */
 const CORS_EXTRA_ORIGINS = String(process.env.CORS_EXTRA_ORIGINS || '')
   .split(',')
@@ -65,6 +72,12 @@ module.exports = {
   GRAPH_TENANT_ID,
   GRAPH_SENDER_EMAIL,
   CORS_EXTRA_ORIGINS,
+
+  EMAIL_HOST,
+  EMAIL_USER,
+  EMAIL_PASS,
+  EMAIL_FROM,
+  INTERNAL_QUIZ_SUMMARY_TO,
 
   isGraphEmailConfigured: () =>
     !!(GRAPH_CLIENT_ID && GRAPH_CLIENT_SECRET && GRAPH_TENANT_ID && GRAPH_SENDER_EMAIL),

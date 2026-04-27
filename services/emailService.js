@@ -1,4 +1,5 @@
 // services/emailService.js
+const nodemailer = require('nodemailer');
 const {
     GRAPH_CLIENT_ID,
     GRAPH_CLIENT_SECRET,
@@ -6,6 +7,11 @@ const {
     GRAPH_SENDER_EMAIL,
     PASS_URL, // fallback if passUrl isn't provided
     QUIZ_PASS_PERCENT,
+    EMAIL_HOST,
+    EMAIL_USER,
+    EMAIL_PASS,
+    EMAIL_FROM,
+    INTERNAL_QUIZ_SUMMARY_TO,
   } = require('../config');
   
   async function getGraphAccessToken() {
@@ -139,6 +145,68 @@ const {
   
     console.log('[EMAIL] Graph sendMail OK');
   }
+
+  async function sendInternalQuizSectionSummaryEmail({
+    toEmail,
+    candidate,
+    scores,
+    totals,
+    percent,
+    passed,
+  }) {
+    const dest = String(toEmail || '').trim();
+    if (!dest) {
+      console.warn('[EMAIL] Internal summary skipped: no recipient');
+      return { sent: false, reason: 'No recipient' };
+    }
+
+    const host = String(EMAIL_HOST || '').trim();
+    const user = String(EMAIL_USER || '').trim();
+    const pass = String(EMAIL_PASS || '').trim();
+    if (!host || !user || !pass) {
+      console.warn('[EMAIL] Internal summary skipped: EMAIL_HOST / EMAIL_USER / EMAIL_PASS not fully configured');
+      return { sent: false, reason: 'SMTP not configured' };
+    }
+
+    const from = String(EMAIL_FROM || user).trim();
+    const name = [candidate?.firstName, candidate?.lastName].filter(Boolean).join(' ').trim();
+    const subject = `Quiz submitted — ${name || candidate?.email || 'unknown'}`;
+
+    const bodyText = `A learner submitted the Kable Academy assessment.
+
+Name: ${name || '(not provided)'}
+Email: ${candidate?.email || ''}
+Phone: ${candidate?.phone || ''}
+
+Section scores (correct / total):
+• Logical reasoning: ${scores.logical}/${totals.logical}
+• Verbal reasoning: ${scores.verbal}/${totals.verbal}
+• Numerical reasoning: ${scores.numerical}/${totals.numerical}
+
+Overall: ${percent}% — ${passed ? 'PASSED' : 'DID NOT PASS'} (pass threshold ${QUIZ_PASS_PERCENT}%)
+`;
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port: 587,
+      secure: false,
+      auth: { user, pass },
+    });
+
+    console.log('[EMAIL] Sending internal section summary…', { to: dest, from });
+    await transporter.sendMail({
+      from,
+      to: dest,
+      subject,
+      text: bodyText,
+    });
+    console.log('[EMAIL] Internal section summary sent.');
+    return { sent: true };
+  }
   
-  module.exports = { sendPassFailEmailGraph, buildPassFailEmail };
+  module.exports = {
+    sendPassFailEmailGraph,
+    buildPassFailEmail,
+    sendInternalQuizSectionSummaryEmail,
+  };
   

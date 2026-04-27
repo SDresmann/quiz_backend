@@ -5,10 +5,10 @@ const crypto = require('crypto');
 const QuizAttempt = require('../schema/quizAttemptSchema');
 const RetakeToken = require('../schema/retakeSchema');
 
-const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT } = require('../config');
+const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT, INTERNAL_QUIZ_SUMMARY_TO } = require('../config');
 
 const { updateHubSpotScores, moveDealToAssessmentsStage } = require('../services/hubspotService');
-const { sendPassFailEmailGraph } = require('../services/emailService'); // Graph email
+const { sendPassFailEmailGraph, sendInternalQuizSectionSummaryEmail } = require('../services/emailService'); // Graph email
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
@@ -155,8 +155,17 @@ router.post('/quiz-submission', async (req, res) => {
   console.log('[API] /api/quiz-submission hit');
 
   try {
-    const { user, logical_reasoning, verbal_reasoning, numerical_reasoning, totalQuestions, answers } =
-      req.body;
+    const {
+      user,
+      logical_reasoning,
+      verbal_reasoning,
+      numerical_reasoning,
+      totalQuestions,
+      logical_total,
+      verbal_total,
+      numerical_total,
+      answers,
+    } = req.body;
 
     console.log('[API] Incoming payload summary:', {
       email: user?.email,
@@ -164,6 +173,9 @@ router.post('/quiz-submission', async (req, res) => {
       verbal_reasoning,
       numerical_reasoning,
       totalQuestions,
+      logical_total,
+      verbal_total,
+      numerical_total,
       answersCount: answers ? Object.keys(answers).length : 0,
     });
 
@@ -183,21 +195,53 @@ router.post('/quiz-submission', async (req, res) => {
     const vr = Number(verbal_reasoning);
     const nr = Number(numerical_reasoning);
     const tq = Number(totalQuestions);
+    let lt = Number(logical_total);
+    let vt = Number(verbal_total);
+    let nt = Number(numerical_total);
 
     if ([lr, vr, nr, tq].some((n) => Number.isNaN(n))) {
       return res.status(400).json({ error: 'Invalid numeric values' });
     }
     if (tq <= 0) return res.status(400).json({ error: 'totalQuestions must be > 0' });
 
-    const totalCorrect = lr + vr + nr;
+    if ([lt, vt, nt].some((n) => Number.isNaN(n) || n <= 0)) {
+      if (tq % 3 === 0) {
+        const per = tq / 3;
+        lt = per;
+        vt = per;
+        nt = per;
+        console.warn('[SCORE] Section totals missing/invalid; inferred equal thirds from totalQuestions:', {
+          tq,
+          per,
+        });
+      } else {
+        return res.status(400).json({ error: 'Missing or invalid section totals (logical_total, verbal_total, numerical_total)' });
+      }
+    }
+
+    if (lr > lt || vr > vt || nr > nt) {
+      console.warn('[SCORE] Section correct counts exceed totals; clamping:', {
+        lr,
+        lt,
+        vr,
+        vt,
+        nr,
+        nt,
+      });
+    }
+    const lrC = Math.min(Math.max(0, lr), lt);
+    const vrC = Math.min(Math.max(0, vr), vt);
+    const nrC = Math.min(Math.max(0, nr), nt);
+
+    const totalCorrect = lrC + vrC + nrC;
     const percent = Math.round((totalCorrect / tq) * 100);
     const passed = percent >= QUIZ_PASS_PERCENT;
 
     console.log('[SCORE] Computed:', {
       email,
-      lr,
-      vr,
-      nr,
+      lr: lrC,
+      vr: vrC,
+      nr: nrC,
       totalCorrect,
       tq,
       percent,
@@ -205,9 +249,9 @@ router.post('/quiz-submission', async (req, res) => {
       passed,
     });
     console.log('[SCORE] Section mapping:', {
-      logical_reasoning: lr,
-      verbal_reasoning: vr,
-      numerical_reasoning: nr,
+      logical_reasoning: lrC,
+      verbal_reasoning: vrC,
+      numerical_reasoning: nrC,
     });
 
 
@@ -226,9 +270,9 @@ router.post('/quiz-submission', async (req, res) => {
         answers: answers && typeof answers === 'object' ? answers : {},
         currentIndex: Math.max(0, tq - 1),
         result: {
-          logical_reasoning: lr,
-          verbal_reasoning: vr,
-          numerical_reasoning: nr,
+          logical_reasoning: lrC,
+          verbal_reasoning: vrC,
+          numerical_reasoning: nrC,
           totalQuestions: tq,
           percent,
           passed,
@@ -256,18 +300,18 @@ router.post('/quiz-submission', async (req, res) => {
       console.log('[FLOW] HubSpot payload preview:', {
         email,
         scores: {
-          logical_reasoning: lr,
-          verbal_reasoning: vr,
-          numerical_reasoning: nr,
+          logical_reasoning: lrC,
+          verbal_reasoning: vrC,
+          numerical_reasoning: nrC,
         },
         passed,
       });
       hubspotResult = await updateHubSpotScores(
         email,
         {
-          logical_reasoning: lr,
-          verbal_reasoning: vr,
-          numerical_reasoning: nr,
+          logical_reasoning: lrC,
+          verbal_reasoning: vrC,
+          numerical_reasoning: nrC,
         },
         passed
       );
@@ -292,6 +336,24 @@ router.post('/quiz-submission', async (req, res) => {
       console.log('[FLOW] Email sent.');
     } catch (emailErr) {
       console.error('[FLOW] Email send failed (quiz result still saved):', emailErr?.message || emailErr);
+    }
+
+    try {
+      await sendInternalQuizSectionSummaryEmail({
+        toEmail: INTERNAL_QUIZ_SUMMARY_TO,
+        candidate: {
+          firstName: user?.firstName || '',
+          lastName: user?.lastName || '',
+          email,
+          phone: user?.phone || '',
+        },
+        scores: { logical: lrC, verbal: vrC, numerical: nrC },
+        totals: { logical: lt, verbal: vt, numerical: nt },
+        percent,
+        passed,
+      });
+    } catch (internalEmailErr) {
+      console.error('[FLOW] Internal summary email failed (quiz result still saved):', internalEmailErr?.message || internalEmailErr);
     }
 
     console.log('[FLOW] Done.');
