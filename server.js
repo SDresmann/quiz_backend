@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 
 const quizRoutes = require('./routes/quizRoutes');
 const authRoutes = require('./routes/authRoutes');
+const Token = require('./schema/tokenSchema');
 
 const {
   PORT,
@@ -20,11 +21,19 @@ const {
   GRAPH_CLIENT_SECRET,
   GRAPH_TENANT_ID,
   GRAPH_SENDER_EMAIL,
+  CORS_EXTRA_ORIGINS,
 } = require('./config');
 
 const app = express();
 const corsOrigins = ['http://localhost:3000'];
 if (FRONTEND_URL && !corsOrigins.includes(FRONTEND_URL)) corsOrigins.push(FRONTEND_URL);
+for (const o of CORS_EXTRA_ORIGINS || []) {
+  if (o && !corsOrigins.includes(o)) corsOrigins.push(o);
+}
+// Common Render hosting for this repo's CRA app (safe default; override via CORS_EXTRA_ORIGINS)
+if (!corsOrigins.includes('https://kable-quiz.onrender.com')) {
+  corsOrigins.push('https://kable-quiz.onrender.com');
+}
 app.use(cors({ origin: corsOrigins }));
 app.use(express.json());
 if (HUBSPOT_REDIRECT_URI) console.log('[BOOT] HubSpot redirect_uri:', HUBSPOT_REDIRECT_URI);
@@ -56,6 +65,25 @@ app.use('/api/quiz', quizRoutes);
 
 app.get('/health', (req, res) => {
   res.status(200).json({ ok: true });
+});
+
+app.get('/api/hubspot-status', async (req, res) => {
+  try {
+    const doc = await Token.findOne({ provider: 'hubspot' }).lean();
+    const hasAccess = !!(doc && doc.access_token);
+    const hasRefresh = !!(doc && doc.refresh_token);
+    return res.json({
+      ok: true,
+      hubspotTokenRowExists: !!doc,
+      hasAccessToken: hasAccess,
+      hasRefreshToken: hasRefresh,
+      updatedAt: doc?.updatedAt || null,
+      scope: doc?.scope || null,
+      redirectUriConfigured: !!HUBSPOT_REDIRECT_URI,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
 });
 
 app.get('/api/email-status', (req, res) => {

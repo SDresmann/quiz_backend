@@ -194,6 +194,7 @@ router.post('/quiz-submission', async (req, res) => {
     const passed = percent >= QUIZ_PASS_PERCENT;
 
     console.log('[SCORE] Computed:', {
+      email,
       lr,
       vr,
       nr,
@@ -202,6 +203,11 @@ router.post('/quiz-submission', async (req, res) => {
       percent,
       passThreshold: QUIZ_PASS_PERCENT,
       passed,
+    });
+    console.log('[SCORE] Section mapping:', {
+      logical_reasoning: lr,
+      verbal_reasoning: vr,
+      numerical_reasoning: nr,
     });
 
 
@@ -247,6 +253,15 @@ router.post('/quiz-submission', async (req, res) => {
     let hubspotResult = null;
     try {
       console.log('[FLOW] Updating HubSpot DEAL fields...');
+      console.log('[FLOW] HubSpot payload preview:', {
+        email,
+        scores: {
+          logical_reasoning: lr,
+          verbal_reasoning: vr,
+          numerical_reasoning: nr,
+        },
+        passed,
+      });
       hubspotResult = await updateHubSpotScores(
         email,
         {

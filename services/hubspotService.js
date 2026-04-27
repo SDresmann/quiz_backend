@@ -8,6 +8,9 @@ const {
   HUBSPOT_STAGE_ACCEPTANCE_LETTER,
   HUBSPOT_STAGE_ASSESSMENTS,
   HUBSPOT_PIPELINE_ID,
+  HUBSPOT_LOGICAL_REASONING_FIELD,
+  HUBSPOT_VERBAL_REASONING_FIELD,
+  HUBSPOT_NUMERICAL_REASONING_FIELD,
 } = require('../config');
 
 // If you're not on Node 18+, uncomment these two lines:
@@ -245,6 +248,14 @@ async function patchHubSpotDealForEmail(email, properties) {
   let accessToken = tokens.access_token;
   let hs = new hubspot.Client({ accessToken });
 
+  class HubSpotDealPatchError extends Error {
+    constructor(details) {
+      super(details?.hubspotError?.message || 'HubSpot deal update failed');
+      this.name = 'HubSpotDealPatchError';
+      this.details = details;
+    }
+  }
+
   async function attemptUpdate() {
     const contactId = await findContactIdByEmail(hs, email);
     if (!contactId) return { updated: false, reason: 'Contact not found', contactId: null };
@@ -261,7 +272,19 @@ async function patchHubSpotDealForEmail(email, properties) {
       properties,
     });
 
-    await hs.crm.deals.basicApi.update(dealId, { properties });
+    try {
+      await hs.crm.deals.basicApi.update(dealId, { properties });
+    } catch (e) {
+      throw new HubSpotDealPatchError({
+        updated: false,
+        reason: 'HubSpot deal update failed',
+        contactId,
+        dealId,
+        pipeline: deal.pipeline,
+        previousDealStage: deal.dealstage,
+        hubspotError: hubSpotErrorSummary(e),
+      });
+    }
 
     console.log('[HUBSPOT] Deal update OK');
     return {
@@ -276,6 +299,10 @@ async function patchHubSpotDealForEmail(email, properties) {
   try {
     return await attemptUpdate();
   } catch (err) {
+    if (err?.name === 'HubSpotDealPatchError' && err?.details) {
+      return err.details;
+    }
+
     const msg = String(err?.message || err);
     console.error('[HUBSPOT] Deal update failed:', hubSpotErrorSummary(err));
 
@@ -284,8 +311,15 @@ async function patchHubSpotDealForEmail(email, properties) {
       accessToken = await refreshHubSpotToken();
       hs = new hubspot.Client({ accessToken });
 
-      const result = await attemptUpdate();
-      return { ...result, refreshed: true };
+      try {
+        const result = await attemptUpdate();
+        return { ...result, refreshed: true };
+      } catch (err2) {
+        if (err2?.name === 'HubSpotDealPatchError' && err2?.details) {
+          return { ...err2.details, refreshed: true };
+        }
+        throw err2;
+      }
     }
 
     throw err;
@@ -293,11 +327,26 @@ async function patchHubSpotDealForEmail(email, properties) {
 }
 
 async function updateHubSpotScores(email, scores, passed) {
+  // Explicit property mapping keeps section scores aligned to the correct HubSpot fields.
+  console.log('[HUBSPOT] Score input:', {
+    email,
+    logical_reasoning: scores.logical_reasoning,
+    verbal_reasoning: scores.verbal_reasoning,
+    numerical_reasoning: scores.numerical_reasoning,
+    passed,
+  });
+  console.log('[HUBSPOT] Field mapping:', {
+    logical_reasoning_field: HUBSPOT_LOGICAL_REASONING_FIELD,
+    verbal_reasoning_field: HUBSPOT_VERBAL_REASONING_FIELD,
+    numerical_reasoning_field: HUBSPOT_NUMERICAL_REASONING_FIELD,
+  });
+
   const scoreProperties = {
-    logical_reasoning: String(scores.logical_reasoning),
-    verbal_reasoning: String(scores.verbal_reasoning),
-    numerical_reasoning: String(scores.numerical_reasoning),
+    [HUBSPOT_LOGICAL_REASONING_FIELD]: String(scores.logical_reasoning ?? 0),
+    [HUBSPOT_VERBAL_REASONING_FIELD]: String(scores.verbal_reasoning ?? 0),
+    [HUBSPOT_NUMERICAL_REASONING_FIELD]: String(scores.numerical_reasoning ?? 0),
   };
+  console.log('[HUBSPOT] Score properties payload:', scoreProperties);
 
   if (!passed) {
     console.log('[HUBSPOT] Passed=false → dealstage unchanged');
