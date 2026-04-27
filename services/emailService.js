@@ -5,6 +5,7 @@ const {
     GRAPH_TENANT_ID,
     GRAPH_SENDER_EMAIL,
     PASS_URL, // fallback if passUrl isn't provided
+    QUIZ_PASS_PERCENT,
   } = require('../config');
   
   async function getGraphAccessToken() {
@@ -53,7 +54,7 @@ const {
   }
   
   function buildPassFailEmail({ firstName, percent, retakeUrl, passUrl }) {
-    const passed = percent >= 60;
+    const passed = percent >= QUIZ_PASS_PERCENT;
     const finalPassUrl = passUrl || PASS_URL;
   
     if (passed) {
@@ -73,8 +74,6 @@ const {
   
   Welcome to the Kable Academy, ${firstName}, where your future in technology begins.
   
-  Score: ${percent}%
-  
   Thanks,
   Kable Academy`,
       };
@@ -85,8 +84,6 @@ const {
       bodyText: `Hi ${firstName || ''},
   
   Thank you for completing the assessment.
-  
-  Score: ${percent}%
   
   Unfortunately, this score does not meet the minimum passing requirement.
   
@@ -102,7 +99,7 @@ const {
   
   async function sendPassFailEmailGraph({ toEmail, firstName, percent, retakeUrl, passUrl }) {
     console.log('[FLOW] Sending pass/fail email now...');
-    const passed = percent >= 60;
+    const passed = percent >= QUIZ_PASS_PERCENT;
   
     console.log(
       `[EMAIL] Preparing ${passed ? 'PASS' : 'FAIL'} email for ${toEmail} (percent=${percent})`
