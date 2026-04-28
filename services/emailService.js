@@ -11,7 +11,6 @@ const {
     EMAIL_USER,
     EMAIL_PASS,
     EMAIL_FROM,
-    INTERNAL_QUIZ_SUMMARY_TO,
   } = require('../config');
   
   async function getGraphAccessToken() {
@@ -154,7 +153,65 @@ const {
     percent,
     passed,
   }) {
-    const dest = String(toEmail || '').trim();
+  const buildInternalSummaryBody = () => {
+    const name = [candidate?.firstName, candidate?.lastName].filter(Boolean).join(' ').trim();
+    const subject = `Quiz submitted - ${name || candidate?.email || 'unknown'}`;
+    const bodyText = `A learner submitted the Kable Academy assessment.
+
+Name: ${name || '(not provided)'}
+Email: ${candidate?.email || ''}
+Phone: ${candidate?.phone || ''}
+
+Section scores (correct / total):
+- Logical reasoning: ${scores.logical}/${totals.logical}
+- Verbal reasoning: ${scores.verbal}/${totals.verbal}
+- Numerical reasoning: ${scores.numerical}/${totals.numerical}
+
+Overall: ${percent}% - ${passed ? 'PASSED' : 'DID NOT PASS'} (pass threshold ${QUIZ_PASS_PERCENT}%)
+`;
+    return { subject, bodyText };
+  };
+
+  const sendViaGraph = async (dest) => {
+    if (!GRAPH_SENDER_EMAIL || !GRAPH_CLIENT_ID || !GRAPH_CLIENT_SECRET || !GRAPH_TENANT_ID) {
+      console.warn('[EMAIL] Internal summary skipped: Graph not fully configured');
+      return { sent: false, reason: 'Graph not configured' };
+    }
+    const { subject, bodyText } = buildInternalSummaryBody();
+    const accessToken = await getGraphAccessToken();
+    const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
+      GRAPH_SENDER_EMAIL
+    )}/sendMail`;
+
+    console.log('[EMAIL] Sending internal section summary via Graph…', {
+      from: GRAPH_SENDER_EMAIL,
+      to: dest,
+    });
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: 'Text', content: bodyText },
+          toRecipients: [{ emailAddress: { address: dest } }],
+        },
+        saveToSentItems: true,
+      }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error('[EMAIL] Internal summary Graph send failed:', resp.status, errText);
+      throw new Error(`Internal summary Graph send failed (${resp.status})`);
+    }
+    console.log('[EMAIL] Internal section summary sent via Graph.');
+    return { sent: true, via: 'graph' };
+  };
+
+  const dest = String(toEmail || EMAIL_USER || GRAPH_SENDER_EMAIL || '').trim();
     if (!dest) {
       console.warn('[EMAIL] Internal summary skipped: no recipient');
       return { sent: false, reason: 'No recipient' };
@@ -164,35 +221,20 @@ const {
     const user = String(EMAIL_USER || '').trim();
     const pass = String(EMAIL_PASS || '').trim();
     if (!host || !user || !pass) {
-      console.warn('[EMAIL] Internal summary skipped: EMAIL_HOST / EMAIL_USER / EMAIL_PASS not fully configured');
-      return { sent: false, reason: 'SMTP not configured' };
-    }
+    console.warn('[EMAIL] SMTP not configured; falling back to Microsoft Graph for internal summary');
+    return sendViaGraph(dest);
+  }
 
-    const from = String(EMAIL_FROM || user).trim();
-    const name = [candidate?.firstName, candidate?.lastName].filter(Boolean).join(' ').trim();
-    const subject = `Quiz submitted — ${name || candidate?.email || 'unknown'}`;
+  const from = String(EMAIL_FROM || user).trim();
+  const { subject, bodyText } = buildInternalSummaryBody();
+  const transporter = nodemailer.createTransport({
+    host,
+    port: 587,
+    secure: false,
+    auth: { user, pass },
+  });
 
-    const bodyText = `A learner submitted the Kable Academy assessment.
-
-Name: ${name || '(not provided)'}
-Email: ${candidate?.email || ''}
-Phone: ${candidate?.phone || ''}
-
-Section scores (correct / total):
-• Logical reasoning: ${scores.logical}/${totals.logical}
-• Verbal reasoning: ${scores.verbal}/${totals.verbal}
-• Numerical reasoning: ${scores.numerical}/${totals.numerical}
-
-Overall: ${percent}% — ${passed ? 'PASSED' : 'DID NOT PASS'} (pass threshold ${QUIZ_PASS_PERCENT}%)
-`;
-
-    const transporter = nodemailer.createTransport({
-      host,
-      port: 587,
-      secure: false,
-      auth: { user, pass },
-    });
-
+  try {
     console.log('[EMAIL] Sending internal section summary…', { to: dest, from });
     await transporter.sendMail({
       from,
@@ -201,8 +243,12 @@ Overall: ${percent}% — ${passed ? 'PASSED' : 'DID NOT PASS'} (pass threshold $
       text: bodyText,
     });
     console.log('[EMAIL] Internal section summary sent.');
-    return { sent: true };
+    return { sent: true, via: 'smtp' };
+  } catch (smtpErr) {
+    console.error('[EMAIL] Internal summary SMTP send failed, retrying via Graph:', smtpErr?.message || smtpErr);
+    return sendViaGraph(dest);
   }
+}
   
   module.exports = {
     sendPassFailEmailGraph,

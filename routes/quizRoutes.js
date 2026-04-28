@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const QuizAttempt = require('../schema/quizAttemptSchema');
 const RetakeToken = require('../schema/retakeSchema');
 
-const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT, INTERNAL_QUIZ_SUMMARY_TO } = require('../config');
+const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT, EMAIL_USER } = require('../config');
 
 const { updateHubSpotScores, moveDealToAssessmentsStage } = require('../services/hubspotService');
 const { sendPassFailEmailGraph, sendInternalQuizSectionSummaryEmail } = require('../services/emailService'); // Graph email
@@ -338,9 +338,11 @@ router.post('/quiz-submission', async (req, res) => {
       console.error('[FLOW] Email send failed (quiz result still saved):', emailErr?.message || emailErr);
     }
 
+    let internalSummaryResult = { sent: false, reason: 'not_attempted' };
     try {
-      await sendInternalQuizSectionSummaryEmail({
-        toEmail: INTERNAL_QUIZ_SUMMARY_TO,
+      console.log('[FLOW] Sending internal section summary...', { toEmail: EMAIL_USER });
+      internalSummaryResult = await sendInternalQuizSectionSummaryEmail({
+        toEmail: EMAIL_USER,
         candidate: {
           firstName: user?.firstName || '',
           lastName: user?.lastName || '',
@@ -352,12 +354,26 @@ router.post('/quiz-submission', async (req, res) => {
         percent,
         passed,
       });
+      console.log('[FLOW] Internal summary email result:', internalSummaryResult);
     } catch (internalEmailErr) {
       console.error('[FLOW] Internal summary email failed (quiz result still saved):', internalEmailErr?.message || internalEmailErr);
+      internalSummaryResult = { sent: false, error: internalEmailErr?.message || String(internalEmailErr) };
     }
 
     console.log('[FLOW] Done.');
-    return res.json({ ok: true, percent, passed, hubspot: hubspotResult, retakeUrl, passUrl, emailSent });
+    return res.json({
+      ok: true,
+      percent,
+      passed,
+      hubspot: hubspotResult,
+      retakeUrl,
+      passUrl,
+      emailSent,
+      internalSummaryEmailSent: !!internalSummaryResult?.sent,
+      internalSummaryEmailChannel: internalSummaryResult?.via || null,
+      internalSummaryRecipient: EMAIL_USER || null,
+      internalSummaryEmailInfo: internalSummaryResult,
+    });
   } catch (err) {
     console.error('[ERROR] quiz-submission crashed:', err);
     return res.status(500).json({ error: 'Server error', details: err?.message || String(err) });
