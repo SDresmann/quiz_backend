@@ -348,8 +348,39 @@ async function updateHubSpotScores(email, scores, passed) {
   };
   console.log('[HUBSPOT] Score properties payload:', scoreProperties);
 
+  async function patchScoresWithDealstage(stageId, logLabel) {
+    const withStage = { ...scoreProperties, dealstage: stageId };
+    console.log(`[HUBSPOT] ${logLabel} → PATCH deal (scores + dealstage):`, stageId);
+
+    try {
+      return await patchHubSpotDealForEmail(email, withStage);
+    } catch (err) {
+      console.error('[HUBSPOT] Scores + stage PATCH failed:', hubSpotErrorSummary(err));
+      console.warn('[HUBSPOT] Retrying dealstage only (custom score properties may be missing on Deal)...');
+      try {
+        const stageOnly = await patchHubSpotDealForEmail(email, { dealstage: stageId });
+        return {
+          ...stageOnly,
+          scorePropertiesSkipped: true,
+          scorePatchError: hubSpotErrorSummary(err),
+        };
+      } catch (err2) {
+        console.error('[HUBSPOT] dealstage-only retry also failed:', hubSpotErrorSummary(err2));
+        throw err2;
+      }
+    }
+  }
+
+  const assessmentsStage = HUBSPOT_STAGE_ASSESSMENTS ? String(HUBSPOT_STAGE_ASSESSMENTS).trim() : '';
+  if (assessmentsStage) {
+    return patchScoresWithDealstage(
+      assessmentsStage,
+      `Quiz submitted (assessments stage, passed=${passed})`
+    );
+  }
+
   if (!passed) {
-    console.log('[HUBSPOT] Passed=false → dealstage unchanged');
+    console.log('[HUBSPOT] Passed=false → dealstage unchanged (no assessments stage configured)');
     return patchHubSpotDealForEmail(email, scoreProperties);
   }
 
@@ -359,26 +390,7 @@ async function updateHubSpotScores(email, scores, passed) {
   }
 
   const stage = String(HUBSPOT_STAGE_ACCEPTANCE_LETTER).trim();
-  const withStage = { ...scoreProperties, dealstage: stage };
-  console.log('[HUBSPOT] Passed=true → PATCH deal (scores + dealstage):', stage);
-
-  try {
-    return await patchHubSpotDealForEmail(email, withStage);
-  } catch (err) {
-    console.error('[HUBSPOT] Scores + stage PATCH failed:', hubSpotErrorSummary(err));
-    console.warn('[HUBSPOT] Retrying dealstage only (custom score properties may be missing on Deal)...');
-    try {
-      const stageOnly = await patchHubSpotDealForEmail(email, { dealstage: stage });
-      return {
-        ...stageOnly,
-        scorePropertiesSkipped: true,
-        scorePatchError: hubSpotErrorSummary(err),
-      };
-    } catch (err2) {
-      console.error('[HUBSPOT] dealstage-only retry also failed:', hubSpotErrorSummary(err2));
-      throw err2;
-    }
-  }
+  return patchScoresWithDealstage(stage, 'Passed=true');
 }
 
 /** First quiz activity this attempt: move deal to configured Assessments stage. */
