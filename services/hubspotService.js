@@ -371,15 +371,11 @@ async function updateHubSpotScores(email, scores, passed) {
     }
   }
 
-  const assessmentsStage = HUBSPOT_STAGE_ASSESSMENTS ? String(HUBSPOT_STAGE_ASSESSMENTS).trim() : '';
-  if (assessmentsStage) {
-    return patchScoresWithDealstage(
-      assessmentsStage,
-      `Quiz submitted (assessments stage, passed=${passed})`
-    );
-  }
-
   if (!passed) {
+    const assessmentsStage = HUBSPOT_STAGE_ASSESSMENTS ? String(HUBSPOT_STAGE_ASSESSMENTS).trim() : '';
+    if (assessmentsStage) {
+      return patchScoresWithDealstage(assessmentsStage, 'Quiz failed → assessments stage');
+    }
     console.log('[HUBSPOT] Passed=false → dealstage unchanged (no assessments stage configured)');
     return patchHubSpotDealForEmail(email, scoreProperties);
   }
@@ -389,8 +385,8 @@ async function updateHubSpotScores(email, scores, passed) {
     return { updated: false, reason: 'Acceptance stage ID not configured' };
   }
 
-  const stage = String(HUBSPOT_STAGE_ACCEPTANCE_LETTER).trim();
-  return patchScoresWithDealstage(stage, 'Passed=true');
+  const acceptanceStage = String(HUBSPOT_STAGE_ACCEPTANCE_LETTER).trim();
+  return patchScoresWithDealstage(acceptanceStage, 'Quiz passed → acceptance stage');
 }
 
 /** First quiz activity this attempt: move deal to configured Assessments stage. */
