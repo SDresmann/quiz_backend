@@ -322,24 +322,20 @@ router.post('/quiz-submission', async (req, res) => {
     }
 
     let emailSent = false;
-    if (!passed) {
-      try {
-        console.log('[FLOW] Sending fail email…');
-        await sendPassFailEmailGraph({
-          toEmail: email,
-          firstName: user?.firstName || '',
-          percent,
-          passed,
-          retakeUrl,
-          passUrl,
-        });
-        emailSent = true;
-        console.log('[FLOW] Fail email sent.');
-      } catch (emailErr) {
-        console.error('[FLOW] Fail email send failed (quiz result still saved):', emailErr?.message || emailErr);
-      }
-    } else {
-      console.log('[FLOW] Skipping candidate pass email.');
+    try {
+      console.log(`[FLOW] Sending candidate ${passed ? 'pass' : 'fail'} email...`);
+      await sendPassFailEmailGraph({
+        toEmail: email,
+        firstName: user?.firstName || '',
+        percent,
+        passed,
+        retakeUrl,
+        passUrl,
+      });
+      emailSent = true;
+      console.log(`[FLOW] Candidate ${passed ? 'pass' : 'fail'} email sent.`);
+    } catch (emailErr) {
+      console.error('[FLOW] Candidate email send failed (quiz result still saved):', emailErr?.message || emailErr);
     }
 
     let internalSummaryResult = { sent: false, reason: 'not_attempted' };

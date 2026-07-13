@@ -217,12 +217,16 @@ Overall: ${percent}% - ${passed ? 'PASSED' : 'DID NOT PASS'} (pass threshold ${Q
       return { sent: false, reason: 'No recipient' };
     }
 
-    const host = String(EMAIL_HOST || '').trim();
-    const user = String(EMAIL_USER || '').trim();
-    const pass = String(EMAIL_PASS || '').trim();
-    if (!host || !user || !pass) {
-    console.warn('[EMAIL] SMTP not configured; falling back to Microsoft Graph for internal summary');
+  if (GRAPH_SENDER_EMAIL && GRAPH_CLIENT_ID && GRAPH_CLIENT_SECRET && GRAPH_TENANT_ID) {
     return sendViaGraph(dest);
+  }
+
+  const host = String(EMAIL_HOST || '').trim();
+  const user = String(EMAIL_USER || '').trim();
+  const pass = String(EMAIL_PASS || '').trim();
+  if (!host || !user || !pass) {
+    console.warn('[EMAIL] Internal summary skipped: no Graph or SMTP configuration');
+    return { sent: false, reason: 'No email configuration' };
   }
 
   const from = String(EMAIL_FROM || user).trim();
@@ -245,8 +249,8 @@ Overall: ${percent}% - ${passed ? 'PASSED' : 'DID NOT PASS'} (pass threshold ${Q
     console.log('[EMAIL] Internal section summary sent.');
     return { sent: true, via: 'smtp' };
   } catch (smtpErr) {
-    console.error('[EMAIL] Internal summary SMTP send failed, retrying via Graph:', smtpErr?.message || smtpErr);
-    return sendViaGraph(dest);
+    console.error('[EMAIL] Internal summary SMTP send failed:', smtpErr?.message || smtpErr);
+    throw smtpErr;
   }
 }
   
