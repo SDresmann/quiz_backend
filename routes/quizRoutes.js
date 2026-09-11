@@ -8,7 +8,8 @@ const RetakeToken = require('../schema/retakeSchema');
 const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT, EMAIL_USER } = require('../config');
 
 const { updateHubSpotScores, moveDealToAssessmentsStage } = require('../services/hubspotService');
-const { sendPassFailEmailGraph, sendInternalQuizSectionSummaryEmail } = require('../services/emailService'); // Graph email
+// Email sending disabled — keep service import commented so it can be re-enabled later
+// const { sendPassFailEmailGraph, sendInternalQuizSectionSummaryEmail } = require('../services/emailService');
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
@@ -321,44 +322,10 @@ router.post('/quiz-submission', async (req, res) => {
       hubspotResult = { error: hubspotErr?.message || String(hubspotErr) };
     }
 
-    let emailSent = false;
-    try {
-      console.log(`[FLOW] Sending candidate ${passed ? 'pass' : 'fail'} email...`);
-      await sendPassFailEmailGraph({
-        toEmail: email,
-        firstName: user?.firstName || '',
-        percent,
-        passed,
-        retakeUrl,
-        passUrl,
-      });
-      emailSent = true;
-      console.log(`[FLOW] Candidate ${passed ? 'pass' : 'fail'} email sent.`);
-    } catch (emailErr) {
-      console.error('[FLOW] Candidate email send failed (quiz result still saved):', emailErr?.message || emailErr);
-    }
-
-    let internalSummaryResult = { sent: false, reason: 'not_attempted' };
-    try {
-      console.log('[FLOW] Sending internal section summary...', { toEmail: EMAIL_USER });
-      internalSummaryResult = await sendInternalQuizSectionSummaryEmail({
-        toEmail: EMAIL_USER,
-        candidate: {
-          firstName: user?.firstName || '',
-          lastName: user?.lastName || '',
-          email,
-          phone: user?.phone || '',
-        },
-        scores: { logical: lrC, verbal: vrC, numerical: nrC },
-        totals: { logical: lt, verbal: vt, numerical: nt },
-        percent,
-        passed,
-      });
-      console.log('[FLOW] Internal summary email result:', internalSummaryResult);
-    } catch (internalEmailErr) {
-      console.error('[FLOW] Internal summary email failed (quiz result still saved):', internalEmailErr?.message || internalEmailErr);
-      internalSummaryResult = { sent: false, error: internalEmailErr?.message || String(internalEmailErr) };
-    }
+    // Emails disabled: no pass/fail candidate email and no internal summary email
+    const emailSent = false;
+    const internalSummaryResult = { sent: false, reason: 'emails_disabled' };
+    console.log('[FLOW] Email sending skipped (disabled).');
 
     console.log('[FLOW] Done.');
     return res.json({

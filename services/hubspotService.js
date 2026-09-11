@@ -34,9 +34,57 @@ function hubSpotErrorSummary(err) {
 
 let resolvedPipelineCache = { raw: null, resolved: null, expiresAt: 0 };
 let resolvePipelineInFlight = null;
+let resolvedStageCache = new Map(); // key: `${pipelineId}|${raw}` → stageId
 
 function isNumericId(value) {
   return /^\d+$/.test(String(value || '').trim());
+}
+
+/**
+ * Resolve a deal stage env value to a HubSpot stage id.
+ * Accepts a numeric stage id, or a stage label (e.g. "Acceptance Letter").
+ */
+async function resolveDealStageId(hsClient, pipelineId, rawStage) {
+  const raw = String(rawStage || '').trim();
+  if (!raw) return null;
+  if (isNumericId(raw)) return raw;
+
+  const pipelineKey = String(pipelineId || '').trim() || 'any';
+  const cacheKey = `${pipelineKey}|${raw.toLowerCase()}`;
+  const cached = resolvedStageCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.stageId;
+
+  const resp = await hsClient.crm.pipelines.pipelinesApi.getAll('deals');
+  const pipelines = (resp?.results || []).filter((p) => !p.archived);
+  const preferred = pipelineId
+    ? pipelines.find((p) => String(p.id) === String(pipelineId))
+    : null;
+  const searchOrder = preferred
+    ? [preferred, ...pipelines.filter((p) => p !== preferred)]
+    : pipelines;
+
+  const needle = raw.toLowerCase();
+  for (const pipeline of searchOrder) {
+    const stages = pipeline?.stages || [];
+    const match =
+      stages.find((s) => String(s.label || '').trim().toLowerCase() === needle) ||
+      stages.find((s) => String(s.label || '').trim().toLowerCase().includes(needle));
+    if (match?.id) {
+      const stageId = String(match.id);
+      console.log('[HUBSPOT] Resolved deal stage:', {
+        raw,
+        stageId,
+        label: match.label,
+        pipelineId: pipeline.id,
+        pipelineLabel: pipeline.label,
+      });
+      resolvedStageCache.set(cacheKey, { stageId, expiresAt: Date.now() + 10 * 60 * 1000 });
+      return stageId;
+    }
+  }
+
+  console.warn('[HUBSPOT] Could not resolve deal stage from value:', raw);
+  return null;
 }
 
 /**
@@ -371,8 +419,35 @@ async function updateHubSpotScores(email, scores, passed) {
     }
   }
 
+  /** Resolve configured stage (id or label); for pass, default label is "Acceptance Letter". */
+  async function resolveStageForUpdate(rawConfigured, fallbackLabel) {
+    const tokens = await getHubSpotTokens();
+    if (!tokens?.access_token) throw new Error('HubSpot not connected');
+
+    const hs = new hubspot.Client({ accessToken: tokens.access_token });
+    const preferredPipeline = String(HUBSPOT_PIPELINE_ID || '').trim()
+      ? await resolvePreferredPipelineId(hs)
+      : null;
+
+    const configured = String(rawConfigured || '').trim();
+    if (configured) {
+      const resolved = await resolveDealStageId(hs, preferredPipeline, configured);
+      if (resolved) return resolved;
+    }
+
+    if (fallbackLabel) {
+      const byLabel = await resolveDealStageId(hs, preferredPipeline, fallbackLabel);
+      if (byLabel) return byLabel;
+    }
+
+    return null;
+  }
+
   if (!passed) {
-    const assessmentsStage = HUBSPOT_STAGE_ASSESSMENTS ? String(HUBSPOT_STAGE_ASSESSMENTS).trim() : '';
+    const assessmentsStage = await resolveStageForUpdate(
+      HUBSPOT_STAGE_ASSESSMENTS,
+      null
+    );
     if (assessmentsStage) {
       return patchScoresWithDealstage(assessmentsStage, 'Quiz failed → assessments stage');
     }
@@ -380,13 +455,23 @@ async function updateHubSpotScores(email, scores, passed) {
     return patchHubSpotDealForEmail(email, scoreProperties);
   }
 
-  if (!HUBSPOT_STAGE_ACCEPTANCE_LETTER) {
-    console.warn('[HUBSPOT] Passed=true but HUBSPOT_STAGE_ACCEPTANCE_LETTER is not configured');
-    return { updated: false, reason: 'Acceptance stage ID not configured' };
+  // Passing the assessment → move deal to Acceptance Letter
+  const acceptanceStage = await resolveStageForUpdate(
+    HUBSPOT_STAGE_ACCEPTANCE_LETTER,
+    'Acceptance Letter'
+  );
+  if (!acceptanceStage) {
+    console.warn(
+      '[HUBSPOT] Passed=true but could not resolve Acceptance Letter stage; updating scores only'
+    );
+    return {
+      ...(await patchHubSpotDealForEmail(email, scoreProperties)),
+      stageSkipped: true,
+      reason: 'Acceptance Letter stage not found',
+    };
   }
 
-  const acceptanceStage = String(HUBSPOT_STAGE_ACCEPTANCE_LETTER).trim();
-  return patchScoresWithDealstage(acceptanceStage, 'Quiz passed → acceptance stage');
+  return patchScoresWithDealstage(acceptanceStage, 'Quiz passed → Acceptance Letter');
 }
 
 /** First quiz activity this attempt: move deal to configured Assessments stage. */
@@ -396,7 +481,17 @@ async function moveDealToAssessmentsStage(email) {
     return { updated: false, reason: 'Assessments stage ID not configured' };
   }
 
-  const stage = String(HUBSPOT_STAGE_ASSESSMENTS).trim();
+  const tokens = await getHubSpotTokens();
+  if (!tokens?.access_token) throw new Error('HubSpot not connected');
+
+  const hs = new hubspot.Client({ accessToken: tokens.access_token });
+  const preferredPipeline = String(HUBSPOT_PIPELINE_ID || '').trim()
+    ? await resolvePreferredPipelineId(hs)
+    : null;
+  const stage =
+    (await resolveDealStageId(hs, preferredPipeline, HUBSPOT_STAGE_ASSESSMENTS)) ||
+    String(HUBSPOT_STAGE_ASSESSMENTS).trim();
+
   console.log('[HUBSPOT] Quiz started / in progress → dealstage:', stage);
   return patchHubSpotDealForEmail(email, { dealstage: stage });
 }
