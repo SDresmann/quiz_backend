@@ -41,50 +41,75 @@ function isNumericId(value) {
 }
 
 /**
- * Resolve a deal stage env value to a HubSpot stage id.
+ * Resolve a deal stage env value to { stageId, pipelineId }.
  * Accepts a numeric stage id, or a stage label (e.g. "Acceptance Letter").
  */
-async function resolveDealStageId(hsClient, pipelineId, rawStage) {
+async function resolveDealStage(hsClient, preferredPipelineId, rawStage) {
   const raw = String(rawStage || '').trim();
   if (!raw) return null;
-  if (isNumericId(raw)) return raw;
 
-  const pipelineKey = String(pipelineId || '').trim() || 'any';
+  const pipelineKey = String(preferredPipelineId || '').trim() || 'any';
   const cacheKey = `${pipelineKey}|${raw.toLowerCase()}`;
   const cached = resolvedStageCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return cached.stageId;
+  if (cached && cached.expiresAt > Date.now()) {
+    return { stageId: cached.stageId, pipelineId: cached.pipelineId, label: cached.label };
+  }
 
   const resp = await hsClient.crm.pipelines.pipelinesApi.getAll('deals');
   const pipelines = (resp?.results || []).filter((p) => !p.archived);
-  const preferred = pipelineId
-    ? pipelines.find((p) => String(p.id) === String(pipelineId))
+  const preferred = preferredPipelineId
+    ? pipelines.find((p) => String(p.id) === String(preferredPipelineId))
     : null;
   const searchOrder = preferred
     ? [preferred, ...pipelines.filter((p) => p !== preferred)]
     : pipelines;
 
   const needle = raw.toLowerCase();
+  const isId = isNumericId(raw);
+
   for (const pipeline of searchOrder) {
     const stages = pipeline?.stages || [];
-    const match =
-      stages.find((s) => String(s.label || '').trim().toLowerCase() === needle) ||
-      stages.find((s) => String(s.label || '').trim().toLowerCase().includes(needle));
+    let match = null;
+    if (isId) {
+      match = stages.find((s) => String(s.id) === raw);
+    } else {
+      match =
+        stages.find((s) => String(s.label || '').trim().toLowerCase() === needle) ||
+        stages.find((s) => String(s.label || '').trim().toLowerCase().includes(needle));
+    }
     if (match?.id) {
-      const stageId = String(match.id);
+      const result = {
+        stageId: String(match.id),
+        pipelineId: String(pipeline.id),
+        label: match.label || null,
+      };
       console.log('[HUBSPOT] Resolved deal stage:', {
         raw,
-        stageId,
-        label: match.label,
-        pipelineId: pipeline.id,
+        ...result,
         pipelineLabel: pipeline.label,
       });
-      resolvedStageCache.set(cacheKey, { stageId, expiresAt: Date.now() + 10 * 60 * 1000 });
-      return stageId;
+      resolvedStageCache.set(cacheKey, {
+        ...result,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+      });
+      return result;
     }
+  }
+
+  // Numeric id not found in any pipeline — still return it, but without pipeline
+  if (isId) {
+    console.warn('[HUBSPOT] Stage id not found in any deal pipeline; using raw id:', raw);
+    return { stageId: raw, pipelineId: preferredPipelineId || null, label: null };
   }
 
   console.warn('[HUBSPOT] Could not resolve deal stage from value:', raw);
   return null;
+}
+
+/** @deprecated use resolveDealStage; kept for callers that only need the stage id */
+async function resolveDealStageId(hsClient, pipelineId, rawStage) {
+  const resolved = await resolveDealStage(hsClient, pipelineId, rawStage);
+  return resolved?.stageId || null;
 }
 
 /**
@@ -222,7 +247,7 @@ async function findContactIdByEmail(hsClient, email) {
   return contactId;
 }
 
-async function findMostRecentDealForContact(hsClient, contactId) {
+async function findMostRecentDealForContact(hsClient, contactId, preferredPipelineOverride = null) {
   console.log('[HUBSPOT] Looking up deals associated to contact:', contactId);
 
   const assoc = await hsClient.crm.associations.v4.basicApi.getPage('contacts', contactId, 'deals');
@@ -232,7 +257,9 @@ async function findMostRecentDealForContact(hsClient, contactId) {
   if (!dealIds.length) return null;
 
   const preferredPipelineRaw = String(HUBSPOT_PIPELINE_ID || '').trim();
-  const preferredPipeline = preferredPipelineRaw ? await resolvePreferredPipelineId(hsClient) : null;
+  const preferredPipeline =
+    preferredPipelineOverride ||
+    (preferredPipelineRaw ? await resolvePreferredPipelineId(hsClient) : null);
   const candidates = [];
 
   for (const dealId of dealIds) {
@@ -256,7 +283,7 @@ async function findMostRecentDealForContact(hsClient, contactId) {
         pipeline,
         dealstage,
       });
-      candidates.push({ dealId, lastMod, pipeline, dealstage });
+      candidates.push({ dealId: String(dealId), lastMod, pipeline, dealstage });
     } catch (e) {
       console.warn('[HUBSPOT] Failed to fetch deal for sorting:', dealId, e?.message || e);
     }
@@ -265,7 +292,7 @@ async function findMostRecentDealForContact(hsClient, contactId) {
   if (!candidates.length) return null;
 
   const inPreferredPipeline = preferredPipeline
-    ? candidates.filter((c) => c.pipeline === preferredPipeline)
+    ? candidates.filter((c) => c.pipeline === String(preferredPipeline))
     : candidates;
 
   if (preferredPipeline && !inPreferredPipeline.length) {
@@ -286,6 +313,7 @@ async function findMostRecentDealForContact(hsClient, contactId) {
 
 /**
  * Patch the contact's most recent deal. Retries once on token expiry.
+ * When setting dealstage, HubSpot requires the matching pipeline — always include both.
  * @param {string} email
  * @param {Record<string, string>} properties HubSpot deal property names → string values
  */
@@ -308,7 +336,21 @@ async function patchHubSpotDealForEmail(email, properties) {
     const contactId = await findContactIdByEmail(hs, email);
     if (!contactId) return { updated: false, reason: 'Contact not found', contactId: null };
 
-    const deal = await findMostRecentDealForContact(hs, contactId);
+    // HubSpot requires pipeline + dealstage together when moving stages.
+    const props = { ...properties };
+    if (props.dealstage && !props.pipeline) {
+      const stageInfo = await resolveDealStage(hs, null, props.dealstage);
+      if (stageInfo?.pipelineId) {
+        props.pipeline = stageInfo.pipelineId;
+        console.log('[HUBSPOT] Including pipeline with dealstage:', {
+          dealstage: props.dealstage,
+          pipeline: props.pipeline,
+          stageLabel: stageInfo.label,
+        });
+      }
+    }
+
+    const deal = await findMostRecentDealForContact(hs, contactId, props.pipeline || null);
     if (!deal) return { updated: false, reason: 'No deal found', contactId };
 
     const dealId = deal.dealId;
@@ -317,11 +359,11 @@ async function patchHubSpotDealForEmail(email, properties) {
       dealId,
       pipeline: deal.pipeline,
       dealstage: deal.dealstage,
-      properties,
+      properties: props,
     });
 
     try {
-      await hs.crm.deals.basicApi.update(dealId, { properties });
+      await hs.crm.deals.basicApi.update(dealId, { properties: props });
     } catch (e) {
       throw new HubSpotDealPatchError({
         updated: false,
@@ -339,8 +381,9 @@ async function patchHubSpotDealForEmail(email, properties) {
       updated: true,
       contactId,
       dealId,
-      pipeline: deal.pipeline,
+      pipeline: props.pipeline || deal.pipeline,
       previousDealStage: deal.dealstage,
+      dealstage: props.dealstage || deal.dealstage,
     };
   }
 
@@ -446,7 +489,7 @@ async function updateHubSpotScores(email, scores, passed) {
   if (!passed) {
     const assessmentsStage = await resolveStageForUpdate(
       HUBSPOT_STAGE_ASSESSMENTS,
-      null
+      'Assessments'
     );
     if (assessmentsStage) {
       return patchScoresWithDealstage(assessmentsStage, 'Quiz failed → assessments stage');
@@ -476,7 +519,8 @@ async function updateHubSpotScores(email, scores, passed) {
 
 /** First quiz activity this attempt: move deal to configured Assessments stage. */
 async function moveDealToAssessmentsStage(email) {
-  if (!HUBSPOT_STAGE_ASSESSMENTS) {
+  const configured = String(HUBSPOT_STAGE_ASSESSMENTS || '').trim();
+  if (!configured) {
     console.warn('[HUBSPOT] Assessments stage move skipped: HUBSPOT_STAGE_ASSESSMENTS / HUBSPOT_ASSESSMENTS_STAGE_ID not set');
     return { updated: false, reason: 'Assessments stage ID not configured' };
   }
@@ -485,15 +529,21 @@ async function moveDealToAssessmentsStage(email) {
   if (!tokens?.access_token) throw new Error('HubSpot not connected');
 
   const hs = new hubspot.Client({ accessToken: tokens.access_token });
-  const preferredPipeline = String(HUBSPOT_PIPELINE_ID || '').trim()
-    ? await resolvePreferredPipelineId(hs)
-    : null;
-  const stage =
-    (await resolveDealStageId(hs, preferredPipeline, HUBSPOT_STAGE_ASSESSMENTS)) ||
-    String(HUBSPOT_STAGE_ASSESSMENTS).trim();
+  // Resolve stage → pipeline from HubSpot (do not trust HUBSPOT_PIPELINE_ID=default alone)
+  let stageInfo = await resolveDealStage(hs, null, configured);
+  if (!stageInfo) {
+    stageInfo = await resolveDealStage(hs, null, 'Assessments');
+  }
+  if (!stageInfo?.stageId) {
+    console.warn('[HUBSPOT] Assessments stage could not be resolved:', configured);
+    return { updated: false, reason: 'Assessments stage not found in HubSpot pipelines' };
+  }
 
-  console.log('[HUBSPOT] Quiz started / in progress → dealstage:', stage);
-  return patchHubSpotDealForEmail(email, { dealstage: stage });
+  const properties = { dealstage: stageInfo.stageId };
+  if (stageInfo.pipelineId) properties.pipeline = stageInfo.pipelineId;
+
+  console.log('[HUBSPOT] Quiz started / in progress → dealstage:', properties);
+  return patchHubSpotDealForEmail(email, properties);
 }
 
 module.exports = {

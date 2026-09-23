@@ -91,16 +91,24 @@ router.post('/quiz-progress', async (req, res) => {
     if (!doc.hubspotAssessmentsStageSet) {
       try {
         hubspotAssessments = await moveDealToAssessmentsStage(email);
+        console.log('[PROGRESS] HubSpot assessments stage result:', hubspotAssessments);
         if (hubspotAssessments?.updated) {
           await QuizAttempt.updateOne(
             { email, attemptNo },
             { $set: { hubspotAssessmentsStageSet: true } }
+          );
+        } else {
+          console.warn(
+            '[PROGRESS] Assessments stage NOT updated:',
+            hubspotAssessments?.reason || hubspotAssessments?.hubspotError || hubspotAssessments
           );
         }
       } catch (e) {
         console.error('[PROGRESS] HubSpot assessments stage failed:', e?.message || e);
         hubspotAssessments = { error: e?.message || String(e) };
       }
+    } else {
+      console.log('[PROGRESS] Skipping HubSpot assessments stage (already set for this attempt)');
     }
 
     return res.json({ ok: true, hubspot: hubspotAssessments });
