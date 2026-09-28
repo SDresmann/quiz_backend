@@ -7,6 +7,7 @@ const {
     GRAPH_SENDER_EMAIL,
     PASS_URL, // fallback if passUrl isn't provided
     QUIZ_PASS_PERCENT,
+    MAX_QUIZ_ATTEMPTS,
     EMAIL_HOST,
     EMAIL_USER,
     EMAIL_PASS,
@@ -84,6 +85,22 @@ const {
       };
     }
   
+    if (!retakeUrl) {
+      return {
+        subject: 'Assessment Result: No Attempts Remaining',
+        bodyText: `Hi ${firstName || ''},
+  
+  Thank you for completing the assessment.
+  
+  Unfortunately, this score does not meet the minimum passing requirement.
+  
+  You have used all ${MAX_QUIZ_ATTEMPTS} attempts and cannot take the assessment again.
+  
+  Thanks,
+  Kable Academy`,
+      };
+    }
+
     return {
       subject: 'Assessment Result: Try Again',
       bodyText: `Hi ${firstName || ''},

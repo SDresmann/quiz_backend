@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const QuizAttempt = require('../schema/quizAttemptSchema');
 const RetakeToken = require('../schema/retakeSchema');
 
-const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT, EMAIL_USER } = require('../config');
+const { FRONTEND_URL, PASS_URL, QUIZ_PASS_PERCENT, EMAIL_USER, MAX_QUIZ_ATTEMPTS } = require('../config');
 
 const { updateHubSpotScores, moveDealToAssessmentsStage } = require('../services/hubspotService');
 const { sendPassFailEmailGraph, sendInternalQuizSectionSummaryEmail } = require('../services/emailService'); // Graph email
@@ -32,12 +32,19 @@ router.get('/quiz-attempt', async (req, res) => {
     if (!email) return res.status(400).json({ error: 'Missing email' });
 
     const attempt = await getLatestAttempt(email);
-    if (!attempt) return res.json({ exists: false });
+    if (!attempt) return res.json({ exists: false, maxAttempts: MAX_QUIZ_ATTEMPTS });
+
+    const maxAttemptsReached =
+      attempt.status === 'completed' &&
+      Number(attempt.attemptNo) >= MAX_QUIZ_ATTEMPTS &&
+      !attempt.result?.passed;
 
     return res.json({
       exists: true,
       status: attempt.status,
       attemptNo: attempt.attemptNo,
+      maxAttempts: MAX_QUIZ_ATTEMPTS,
+      maxAttemptsReached,
       currentIndex: attempt.currentIndex ?? 0,
       answers: attempt.answers ?? {},
       user: attempt.user ?? null,
@@ -66,6 +73,13 @@ router.post('/quiz-progress', async (req, res) => {
     }
 
     const attemptNo = latest?.attemptNo ?? 1;
+    if (attemptNo > MAX_QUIZ_ATTEMPTS) {
+      console.warn('[PROGRESS] Blocked: max attempts reached for', email, { attemptNo });
+      return res.status(403).json({
+        error: 'Maximum attempts reached',
+        maxAttempts: MAX_QUIZ_ATTEMPTS,
+      });
+    }
 
     const doc = await QuizAttempt.findOneAndUpdate(
       { email, attemptNo },
@@ -133,12 +147,24 @@ router.post('/retake/redeem', async (req, res) => {
 
     const email = normalizeEmail(doc.email);
 
+    const latest = await getLatestAttempt(email);
+    const nextAttemptNo = (latest?.attemptNo ?? 0) + 1;
+    const completedCount = await QuizAttempt.countDocuments({ email, status: 'completed' });
+
+    if (completedCount >= MAX_QUIZ_ATTEMPTS || nextAttemptNo > MAX_QUIZ_ATTEMPTS) {
+      console.warn('[RETAKE] Blocked: max attempts reached for', email, {
+        completedCount,
+        nextAttemptNo,
+      });
+      return res.status(403).json({
+        error: 'Maximum attempts reached',
+        maxAttempts: MAX_QUIZ_ATTEMPTS,
+      });
+    }
+
     doc.used = true;
     doc.usedAt = new Date();
     await doc.save();
-
-    const latest = await getLatestAttempt(email);
-    const nextAttemptNo = (latest?.attemptNo ?? 0) + 1;
 
     await QuizAttempt.create({
       email,
@@ -198,6 +224,13 @@ router.post('/quiz-submission', async (req, res) => {
     }
 
     const attemptNo = latest?.attemptNo ?? 1;
+    if (attemptNo > MAX_QUIZ_ATTEMPTS) {
+      console.warn('[SUBMIT] Blocked: max attempts reached for', email, { attemptNo });
+      return res.status(403).json({
+        error: 'Maximum attempts reached',
+        maxAttempts: MAX_QUIZ_ATTEMPTS,
+      });
+    }
 
     const lr = Number(logical_reasoning);
     const vr = Number(verbal_reasoning);
@@ -296,10 +329,16 @@ router.post('/quiz-submission', async (req, res) => {
     if (passed) {
       passUrl = PASS_URL || null;
       console.log('[PASS] passUrl:', passUrl);
-    } else {
+    } else if (attemptNo < MAX_QUIZ_ATTEMPTS) {
       const token = await createRetakeToken(email);
       retakeUrl = `${FRONTEND_URL}/?retake=${encodeURIComponent(token)}`;
       console.log('[RETAKE] Generated retakeUrl:', retakeUrl);
+    } else {
+      console.log('[RETAKE] No retake token: max attempts reached', {
+        email,
+        attemptNo,
+        maxAttempts: MAX_QUIZ_ATTEMPTS,
+      });
     }
 
     let hubspotResult = null;
@@ -376,6 +415,9 @@ router.post('/quiz-submission', async (req, res) => {
       hubspot: hubspotResult,
       retakeUrl,
       passUrl,
+      attemptNo,
+      maxAttempts: MAX_QUIZ_ATTEMPTS,
+      maxAttemptsReached: !passed && attemptNo >= MAX_QUIZ_ATTEMPTS,
       emailSent,
       internalSummaryEmailSent: !!internalSummaryResult?.sent,
       internalSummaryEmailChannel: internalSummaryResult?.via || null,
