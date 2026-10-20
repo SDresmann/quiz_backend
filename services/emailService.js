@@ -7,7 +7,6 @@ const {
     GRAPH_SENDER_EMAIL,
     PASS_URL, // fallback if passUrl isn't provided
     QUIZ_PASS_PERCENT,
-    MAX_QUIZ_ATTEMPTS,
     EMAIL_HOST,
     EMAIL_USER,
     EMAIL_PASS,
@@ -87,17 +86,23 @@ const {
   
     if (!retakeUrl) {
       return {
-        subject: 'Assessment Result: No Attempts Remaining',
+        subject: 'Kable Academy Admissions Decision',
         bodyText: `Hi ${firstName || ''},
-  
-  Thank you for completing the assessment.
-  
-  Unfortunately, this score does not meet the minimum passing requirement.
-  
-  You have used all ${MAX_QUIZ_ATTEMPTS} attempts and cannot take the assessment again.
-  
-  Thanks,
-  Kable Academy`,
+
+Thank you for your interest in Kable Academy and for the time and effort you've invested in our admissions process.
+
+After reviewing the results of your three assessment attempts, we regret to inform you that we will not be moving forward with your application at this time.
+
+Our priority is to ensure that every student enters our program with the foundational skills needed to succeed. Based on your assessment results, we believe additional preparation would be beneficial before beginning our accelerated training program.
+
+We encourage you to take the next few months to strengthen your foundational skills and continue building your knowledge. You are welcome to reapply after three months, once enrollment for an upcoming cohort is open. We would be happy to reconsider your application at that time.
+
+If you would like to appeal this decision, you may contact our Director of Admissions at helshamy@kableacademy.com to request a call to discuss your application. Please note that submitting an appeal does not guarantee acceptance into the program.
+
+We appreciate your interest in Kable Academy and wish you the best as you continue working toward your professional goals.
+
+Best regards,
+Kable Academy Admissions Team`,
       };
     }
 
