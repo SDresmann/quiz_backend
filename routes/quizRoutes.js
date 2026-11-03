@@ -104,7 +104,12 @@ router.post('/quiz-progress', async (req, res) => {
     let hubspotAssessments = null;
     if (!doc.hubspotAssessmentsStageSet) {
       try {
-        hubspotAssessments = await moveDealToAssessmentsStage(email);
+        hubspotAssessments = await moveDealToAssessmentsStage(email, {
+          firstName: user?.firstName || '',
+          lastName: user?.lastName || '',
+          phone: user?.phone || '',
+          email,
+        });
         console.log('[PROGRESS] HubSpot assessments stage result:', hubspotAssessments);
         if (hubspotAssessments?.updated) {
           await QuizAttempt.updateOne(
@@ -362,7 +367,18 @@ router.post('/quiz-submission', async (req, res) => {
         },
         passed
       );
-      console.log('[FLOW] HubSpot update result:', hubspotResult);
+      console.log('[FLOW] HubSpot update result:', {
+        updated: hubspotResult?.updated,
+        scoresUpdated: hubspotResult?.scoresUpdated,
+        stageUpdated: hubspotResult?.stageUpdated,
+        scoreTarget: hubspotResult?.scoreTarget,
+        dealId: hubspotResult?.dealId,
+        contactId: hubspotResult?.contactId,
+        reason: hubspotResult?.reason,
+        scorePatchError: hubspotResult?.scorePatchError,
+        contactScoreError: hubspotResult?.contactScoreError,
+        hubspotError: hubspotResult?.hubspotError,
+      });
     } catch (hubspotErr) {
       console.error('[FLOW] HubSpot update failed (quiz result still saved):', hubspotErr?.message || hubspotErr);
       hubspotResult = { error: hubspotErr?.message || String(hubspotErr) };

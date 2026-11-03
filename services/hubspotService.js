@@ -247,6 +247,58 @@ async function findContactIdByEmail(hsClient, email) {
   return contactId;
 }
 
+async function createContact(hsClient, user) {
+  const email = String(user?.email || '').trim().toLowerCase();
+  const properties = {
+    email,
+    firstname: String(user?.firstName || '').trim(),
+    lastname: String(user?.lastName || '').trim(),
+  };
+  const phone = String(user?.phone || '').trim();
+  if (phone) properties.phone = phone;
+
+  console.log('[HUBSPOT] Creating contact (not found in HubSpot):', { email });
+  const created = await hsClient.crm.contacts.basicApi.create({ properties });
+  const contactId = created?.id ? String(created.id) : null;
+  console.log('[HUBSPOT] Contact created:', contactId);
+  return contactId;
+}
+
+async function createDealInAssessmentsStage(hsClient, { contactId, user, stageId, pipelineId }) {
+  const nameParts = [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim();
+  const dealname = nameParts
+    ? `${nameParts} - Assessment`
+    : `${user?.email || 'Learner'} - Assessment`;
+
+  const properties = {
+    dealname,
+    dealstage: String(stageId),
+  };
+  if (pipelineId) properties.pipeline = String(pipelineId);
+
+  console.log('[HUBSPOT] Creating deal in Assessments stage:', {
+    contactId,
+    properties,
+  });
+
+  // Association type 3 = deal → contact
+  const created = await hsClient.crm.deals.basicApi.create({
+    properties,
+    associations: contactId
+      ? [
+          {
+            to: { id: contactId },
+            types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }],
+          },
+        ]
+      : undefined,
+  });
+
+  const dealId = created?.id ? String(created.id) : null;
+  console.log('[HUBSPOT] Deal created:', dealId);
+  return dealId;
+}
+
 async function findMostRecentDealForContact(hsClient, contactId, preferredPipelineOverride = null) {
   console.log('[HUBSPOT] Looking up deals associated to contact:', contactId);
 
@@ -417,6 +469,40 @@ async function patchHubSpotDealForEmail(email, properties) {
   }
 }
 
+async function patchHubSpotContactScores(email, scoreProperties) {
+  const tokens = await getHubSpotTokens();
+  if (!tokens?.access_token) throw new Error('HubSpot not connected');
+
+  let accessToken = tokens.access_token;
+  let hs = new hubspot.Client({ accessToken });
+
+  async function attempt() {
+    const contactId = await findContactIdByEmail(hs, email);
+    if (!contactId) return { updated: false, reason: 'Contact not found', contactId: null };
+
+    console.log('[HUBSPOT] Updating CONTACT score properties...', { contactId, scoreProperties });
+    await hs.crm.contacts.basicApi.update(contactId, { properties: scoreProperties });
+    console.log('[HUBSPOT] Contact score properties PATCH OK');
+    return { updated: true, contactId, via: 'contact' };
+  }
+
+  try {
+    return await attempt();
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('expired')) {
+      accessToken = await refreshHubSpotToken();
+      hs = new hubspot.Client({ accessToken });
+      try {
+        return { ...(await attempt()), refreshed: true };
+      } catch (err2) {
+        return { updated: false, reason: 'Contact score update failed', hubspotError: hubSpotErrorSummary(err2) };
+      }
+    }
+    return { updated: false, reason: 'Contact score update failed', hubspotError: hubSpotErrorSummary(err) };
+  }
+}
+
 async function updateHubSpotScores(email, scores, passed) {
   // Explicit property mapping keeps section scores aligned to the correct HubSpot fields.
   console.log('[HUBSPOT] Score input:', {
@@ -439,27 +525,90 @@ async function updateHubSpotScores(email, scores, passed) {
   };
   console.log('[HUBSPOT] Score properties payload:', scoreProperties);
 
+  async function ensureScoresWritten(dealScoreResult) {
+    if (dealScoreResult?.updated || dealScoreResult?.scoresUpdated) {
+      return { ...dealScoreResult, scoresUpdated: true, scoreTarget: 'deal' };
+    }
+
+    console.warn(
+      '[HUBSPOT] Deal score write failed; trying CONTACT properties:',
+      dealScoreResult?.scorePatchError || dealScoreResult?.hubspotError || dealScoreResult?.reason
+    );
+    const contactResult = await patchHubSpotContactScores(email, scoreProperties);
+    if (contactResult?.updated) {
+      return {
+        ...dealScoreResult,
+        updated: true,
+        scoresUpdated: true,
+        scoreTarget: 'contact',
+        contactId: contactResult.contactId || dealScoreResult?.contactId,
+      };
+    }
+
+    return {
+      ...dealScoreResult,
+      scoresUpdated: false,
+      scoreTarget: null,
+      contactScoreError: contactResult?.hubspotError || contactResult?.reason || null,
+    };
+  }
+
   async function patchScoresWithDealstage(stageId, logLabel) {
     const withStage = { ...scoreProperties, dealstage: stageId };
     console.log(`[HUBSPOT] ${logLabel} → PATCH deal (scores + dealstage):`, stageId);
 
-    try {
-      return await patchHubSpotDealForEmail(email, withStage);
-    } catch (err) {
-      console.error('[HUBSPOT] Scores + stage PATCH failed:', hubSpotErrorSummary(err));
-      console.warn('[HUBSPOT] Retrying dealstage only (custom score properties may be missing on Deal)...');
-      try {
-        const stageOnly = await patchHubSpotDealForEmail(email, { dealstage: stageId });
-        return {
-          ...stageOnly,
-          scorePropertiesSkipped: true,
-          scorePatchError: hubSpotErrorSummary(err),
-        };
-      } catch (err2) {
-        console.error('[HUBSPOT] dealstage-only retry also failed:', hubSpotErrorSummary(err2));
-        throw err2;
-      }
+    // patchHubSpotDealForEmail returns { updated:false } instead of throwing on API errors.
+    const combined = await patchHubSpotDealForEmail(email, withStage);
+    if (combined?.updated) {
+      return { ...combined, scoresUpdated: true, stageUpdated: true, scoreTarget: 'deal' };
     }
+
+    const combinedError = combined?.hubspotError || combined?.reason || 'unknown';
+    console.warn('[HUBSPOT] Scores + stage PATCH failed; splitting updates:', combinedError);
+
+    // 1) Scores alone — do not let a stage/pipeline issue block score writes
+    const scoresOnly = await patchHubSpotDealForEmail(email, scoreProperties);
+    if (!scoresOnly?.updated) {
+      console.error(
+        '[HUBSPOT] Deal score properties PATCH failed:',
+        scoresOnly?.hubspotError || scoresOnly?.reason || 'unknown',
+        scoreProperties
+      );
+    } else {
+      console.log('[HUBSPOT] Deal score properties PATCH OK');
+    }
+
+    // 2) Stage alone
+    const stageOnly = await patchHubSpotDealForEmail(email, { dealstage: stageId });
+    if (!stageOnly?.updated) {
+      console.error(
+        '[HUBSPOT] dealstage-only PATCH failed:',
+        stageOnly?.hubspotError || stageOnly?.reason || 'unknown'
+      );
+    } else {
+      console.log('[HUBSPOT] dealstage-only PATCH OK:', stageId);
+    }
+
+    const splitResult = {
+      updated: !!(scoresOnly?.updated || stageOnly?.updated),
+      scoresUpdated: !!scoresOnly?.updated,
+      stageUpdated: !!stageOnly?.updated,
+      contactId: scoresOnly?.contactId || stageOnly?.contactId || combined?.contactId,
+      dealId: scoresOnly?.dealId || stageOnly?.dealId || combined?.dealId,
+      pipeline: stageOnly?.pipeline || scoresOnly?.pipeline || combined?.pipeline,
+      previousDealStage: stageOnly?.previousDealStage || combined?.previousDealStage,
+      dealstage: stageOnly?.dealstage || combined?.dealstage,
+      combinedError,
+      scorePatchError: scoresOnly?.updated
+        ? null
+        : scoresOnly?.hubspotError || scoresOnly?.reason || null,
+      stagePatchError: stageOnly?.updated
+        ? null
+        : stageOnly?.hubspotError || stageOnly?.reason || null,
+      scorePropertiesSkipped: !scoresOnly?.updated,
+    };
+
+    return ensureScoresWritten(splitResult);
   }
 
   /** Resolve configured stage (id or label); for pass, default label is "Acceptance Letter". */
@@ -495,7 +644,8 @@ async function updateHubSpotScores(email, scores, passed) {
       return patchScoresWithDealstage(assessmentsStage, 'Quiz failed → assessments stage');
     }
     console.log('[HUBSPOT] Passed=false → dealstage unchanged (no assessments stage configured)');
-    return patchHubSpotDealForEmail(email, scoreProperties);
+    const scoresOnly = await patchHubSpotDealForEmail(email, scoreProperties);
+    return ensureScoresWritten({ ...scoresOnly, scoresUpdated: !!scoresOnly?.updated });
   }
 
   // Passing the assessment → move deal to Acceptance Letter
@@ -507,8 +657,9 @@ async function updateHubSpotScores(email, scores, passed) {
     console.warn(
       '[HUBSPOT] Passed=true but could not resolve Acceptance Letter stage; updating scores only'
     );
+    const scoresOnly = await patchHubSpotDealForEmail(email, scoreProperties);
     return {
-      ...(await patchHubSpotDealForEmail(email, scoreProperties)),
+      ...(await ensureScoresWritten({ ...scoresOnly, scoresUpdated: !!scoresOnly?.updated })),
       stageSkipped: true,
       reason: 'Acceptance Letter stage not found',
     };
@@ -517,8 +668,13 @@ async function updateHubSpotScores(email, scores, passed) {
   return patchScoresWithDealstage(acceptanceStage, 'Quiz passed → Acceptance Letter');
 }
 
-/** First quiz activity this attempt: move deal to configured Assessments stage. */
-async function moveDealToAssessmentsStage(email) {
+/**
+ * First quiz activity this attempt:
+ * - If contact + deal exist → move deal to Assessments
+ * - If contact missing → create contact, create deal in Assessments
+ * - If contact exists but no deal → create deal in Assessments
+ */
+async function moveDealToAssessmentsStage(email, user = {}) {
   const configured = String(HUBSPOT_STAGE_ASSESSMENTS || '').trim();
   if (!configured) {
     console.warn('[HUBSPOT] Assessments stage move skipped: HUBSPOT_STAGE_ASSESSMENTS / HUBSPOT_ASSESSMENTS_STAGE_ID not set');
@@ -528,22 +684,93 @@ async function moveDealToAssessmentsStage(email) {
   const tokens = await getHubSpotTokens();
   if (!tokens?.access_token) throw new Error('HubSpot not connected');
 
-  const hs = new hubspot.Client({ accessToken: tokens.access_token });
-  // Resolve stage → pipeline from HubSpot (do not trust HUBSPOT_PIPELINE_ID=default alone)
-  let stageInfo = await resolveDealStage(hs, null, configured);
-  if (!stageInfo) {
-    stageInfo = await resolveDealStage(hs, null, 'Assessments');
-  }
-  if (!stageInfo?.stageId) {
-    console.warn('[HUBSPOT] Assessments stage could not be resolved:', configured);
-    return { updated: false, reason: 'Assessments stage not found in HubSpot pipelines' };
+  let accessToken = tokens.access_token;
+  let hs = new hubspot.Client({ accessToken });
+
+  async function run() {
+    // Resolve stage → pipeline from HubSpot (do not trust HUBSPOT_PIPELINE_ID=default alone)
+    let stageInfo = await resolveDealStage(hs, null, configured);
+    if (!stageInfo) {
+      stageInfo = await resolveDealStage(hs, null, 'Assessments');
+    }
+    if (!stageInfo?.stageId) {
+      console.warn('[HUBSPOT] Assessments stage could not be resolved:', configured);
+      return { updated: false, reason: 'Assessments stage not found in HubSpot pipelines' };
+    }
+
+    const properties = { dealstage: stageInfo.stageId };
+    if (stageInfo.pipelineId) properties.pipeline = stageInfo.pipelineId;
+
+    let contactId = await findContactIdByEmail(hs, email);
+    let createdContact = false;
+    if (!contactId) {
+      contactId = await createContact(hs, {
+        email,
+        firstName: user?.firstName,
+        lastName: user?.lastName,
+        phone: user?.phone,
+      });
+      createdContact = true;
+      if (!contactId) {
+        return { updated: false, reason: 'Failed to create HubSpot contact' };
+      }
+    }
+
+    const existingDeal = await findMostRecentDealForContact(hs, contactId, stageInfo.pipelineId || null);
+    if (existingDeal?.dealId) {
+      console.log('[HUBSPOT] Quiz started → moving existing deal to Assessments:', {
+        contactId,
+        dealId: existingDeal.dealId,
+        properties,
+      });
+      await hs.crm.deals.basicApi.update(existingDeal.dealId, { properties });
+      return {
+        updated: true,
+        createdContact,
+        createdDeal: false,
+        contactId,
+        dealId: existingDeal.dealId,
+        pipeline: properties.pipeline || existingDeal.pipeline,
+        previousDealStage: existingDeal.dealstage,
+        dealstage: properties.dealstage,
+      };
+    }
+
+    // Not in the system (or no deal) → create deal already in Assessments
+    const dealId = await createDealInAssessmentsStage(hs, {
+      contactId,
+      user: { ...user, email },
+      stageId: stageInfo.stageId,
+      pipelineId: stageInfo.pipelineId,
+    });
+    if (!dealId) {
+      return { updated: false, reason: 'Failed to create HubSpot deal', contactId, createdContact };
+    }
+
+    return {
+      updated: true,
+      createdContact,
+      createdDeal: true,
+      contactId,
+      dealId,
+      pipeline: stageInfo.pipelineId,
+      dealstage: stageInfo.stageId,
+    };
   }
 
-  const properties = { dealstage: stageInfo.stageId };
-  if (stageInfo.pipelineId) properties.pipeline = stageInfo.pipelineId;
-
-  console.log('[HUBSPOT] Quiz started / in progress → dealstage:', properties);
-  return patchHubSpotDealForEmail(email, properties);
+  try {
+    return await run();
+  } catch (err) {
+    const msg = String(err?.message || err);
+    console.error('[HUBSPOT] Assessments stage move failed:', hubSpotErrorSummary(err));
+    if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('expired')) {
+      console.warn('[HUBSPOT] Unauthorized/expired. Refreshing token and retrying once…');
+      accessToken = await refreshHubSpotToken();
+      hs = new hubspot.Client({ accessToken });
+      return { ...(await run()), refreshed: true };
+    }
+    throw err;
+  }
 }
 
 module.exports = {
